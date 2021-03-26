@@ -29,6 +29,9 @@ import Constraints.Set.Solver
 import Debug.Trace
 #endif
 
+valueName :: Value -> String
+valueName = error "TODO figure this out"
+
 -- A monad to manage fresh variable generation
 data ConstraintState = ConstraintState { freshIdSrc :: !Int  }
 type ConstraintGen = State ConstraintState
@@ -48,13 +51,13 @@ data Constructor = Ref
 
 data Var = Fresh !Int
          | LocationSet !Value -- The X_{l_i} variables
-         | LoadedLocation !Instruction
+         | LoadedLocation !Stmt
          | ArgLocation !Argument
          | VirtualArg !Value !Int
          | VirtualFieldArg !Type !Int !Int
-         | RetLocation !Instruction
+         | RetLocation !Stmt
          | GEPLocation !Value
-         | PhiCopy !Instruction
+         | PhiCopy !Stmt
          | FieldLoc Text {-!Type-} !Int
          deriving (Eq, Ord, Show, Typeable)
 
@@ -72,14 +75,14 @@ andersenPointsTo :: Andersen -> Value -> [Value]
 andersenPointsTo (Andersen ss) v =
   either fromError (map fromLocation) (leastSolution ss var)
   where
-    var = case valueContent' v of
-      ArgumentC a -> ArgLocation a
-      InstructionC i@CallInst {} -> RetLocation i
-      InstructionC i@InvokeInst {} -> RetLocation i
-      InstructionC i@LoadInst {} -> LoadedLocation i
-      InstructionC i@SelectInst {} -> PhiCopy i
-      InstructionC i@PhiNode {} -> PhiCopy i
-      InstructionC GetElementPtrInst { getElementPtrValue = base } ->
+    var = case v of
+      Value _ _ (ValIdent (IdentValArgument a)) -> ArgLocation a
+      Value _ _ (ValIdent (IdentValStmt i@Stmt {stmtInstr = Call {}})) -> RetLocation i
+      Value _ _ (ValIdent (IdentValStmt i@Stmt {stmtInstr = Invoke {}})) -> RetLocation i
+      Value _ _ (ValIdent (IdentValStmt i@Stmt {stmtInstr = Load {}})) -> LoadedLocation i
+      Value _ _ (ValIdent (IdentValStmt i@Stmt {stmtInstr = Select {}})) -> PhiCopy i
+      Value _ _ (ValIdent (IdentValStmt i@Stmt {stmtInstr = Phi {}})) -> PhiCopy i
+      Value _ _ (ValIdent (IdentValStmt Stmt {stmtInstr = GEP _ base _})) ->
         -- should be a FieldLoc
         GEPLocation (getTargetIfLoad base)
       _ -> LocationSet v
@@ -103,8 +106,8 @@ runPointsToAnalysisWith ignore m = evalState (pta ignore m) (ConstraintState 0)
 -- constraints, so convert solving failures into an IO exception.
 pta :: (Value -> Bool) -> Module -> ConstraintGen Andersen
 pta ignore m = do
-  initConstraints <- foldM globalInitializerConstraints [] (moduleGlobalVariables m)
-  funcConstraints <- foldM functionConstraints [] (moduleDefinedFunctions m)
+  initConstraints <- foldM globalInitializerConstraints [] (modGlobals m)
+  funcConstraints <- foldM functionConstraints [] (modDefines m)
   let is = initConstraints ++ funcConstraints
       sol = either throwErr id (solveSystem is)
   return $! Andersen sol
@@ -121,10 +124,8 @@ pta ignore m = do
     -- instance of a struct field maps to the same struct field slot
     -- indexed by type/position).
     virtArgVar sa ix =
-      case valueContent' sa of
-        InstructionC GetElementPtrInst { getElementPtrValue = base
-                                       , getElementPtrIndices = ixs
-                                       } ->
+      case sa of
+        ValInstr (GEP _ base ixs) ->
           case fieldDescriptor base ixs of
             Just (t, fldno) -> setVariable (VirtualFieldArg t fldno ix)
             Nothing -> setVariable (VirtualArg sa ix)
@@ -144,25 +145,23 @@ pta ignore m = do
     -- Still need a few more.
 
     setVarFor v =
-      case valueContent' v of
-        InstructionC i@LoadInst {} -> return $ loadVar i
-        InstructionC i@CallInst {} -> return $ returnVar i
-        InstructionC i@InvokeInst {} -> return $ returnVar i
-        InstructionC i@PhiNode {} -> return $ phiVar i
-        InstructionC i@SelectInst {} -> return $ phiVar i
-        InstructionC GetElementPtrInst { getElementPtrValue = base } ->
+      case v of
+        Value _ _ (ValIdent (IdentValStmt i@Stmt { stmtInstr = Load {}})) -> return $ loadVar i
+        Value _ _ (ValIdent (IdentValStmt i@Stmt { stmtInstr = Call {}})) -> return $ returnVar i
+        Value _ _ (ValIdent (IdentValStmt i@Stmt { stmtInstr = Invoke {}})) -> return $ returnVar i
+        Value _ _ (ValIdent (IdentValStmt i@Stmt { stmtInstr = Phi {}})) -> return $ phiVar i
+        Value _ _ (ValIdent (IdentValStmt i@Stmt { stmtInstr = Select {}})) -> return $ phiVar i
+        Value _ _ (ValIdent (IdentValStmt Stmt { stmtInstr = (GEP _ base _)})) ->
           return $ gepVar (getTargetIfLoad base)
-        ArgumentC a -> return $ argVar a
+        Value _ _ (ValIdent (IdentValArgument a)) -> return $ argVar a
         _ -> Nothing
 
     -- Have to be careful handling phi nodes - those will actually need to
     -- generate many constraints, and the rule for each one can generate a
     -- new set of assignments.
     setExpFor v =
-      case valueContent' v of
-        InstructionC GetElementPtrInst { getElementPtrValue = base
-                                       , getElementPtrIndices = ixs
-                                       } ->
+      case v of
+        ValInstr (GEP _ base ixs) ->
           case fieldDescriptor base ixs of
             -- If we couldn't compute a field descriptor, this is an
             -- array.
@@ -176,15 +175,11 @@ pta ignore m = do
         -- This case is a bit of a hack to deal with the conversion from
         -- an array type to a pointer to the first element (using a
         -- constant GEP with all zero indices).
-        ConstantC ConstantValue { constantInstruction = (valueContent' ->
-          InstructionC GetElementPtrInst { getElementPtrValue = base
-                                         , getElementPtrIndices = is
-                                         })} ->
-          case valueType base of
-            TypePointer (TypeArray _ _) _ ->
-              case all isConstantZero is of
-                True -> setVariable (LocationSet base)
-                False -> loc v
+        Value _ _ (ValConstExpr (ConstGEP _ _ _ (base:is))) | error "TODO figure this out" ->
+          case valType base of
+            PtrTo (Array _ _)
+              | all isConstantZero is -> setVariable (LocationSet base)
+              | otherwise -> loc v
             _ ->
               case fieldDescriptor base is of
                 Nothing -> gepVar (getTargetIfLoad base)
@@ -197,9 +192,9 @@ pta ignore m = do
     -- determine if the initializer is a copy of another global or an
     -- address to a specific location
     globalInitializerConstraints acc global =
-      case globalVariableInitializer global of
+      case globalValue global of
         Nothing -> return acc
-        Just (valueContent -> ConstantC _) -> return acc
+        Just (Value _ _ (ValConstExpr _)) -> return acc
         Just i -> do
           f1 <- freshVariable
           f2 <- freshVariable
@@ -208,10 +203,10 @@ pta ignore m = do
               c3 = f2 <=! f1
           return $ c1 : c2 : c3 : acc
 
-    functionConstraints acc = foldM instructionConstraints acc . functionInstructions
-    instructionConstraints acc i =
-      case i of
-        LoadInst { loadAddress = la }
+    functionConstraints acc = foldM stmtConstraints acc . defStmts
+    stmtConstraints acc i =
+      case stmtInstr i of
+        Load la _ _
           | ignore la -> return acc
           | otherwise -> do
             -- If we load a function pointer, add new virtual nodes and
@@ -223,7 +218,7 @@ pta ignore m = do
         -- If you store the stored address is a function type, add
         -- inclusion edges between the virtual arguments.  If sv is a
         -- Function, add virtual args linked to formals.
-        StoreInst { storeAddress = sa, storeValue = sv }
+        Store sv sa _ _
           | ignore sa || ignore sv -> return acc
           | otherwise -> do
             f1 <- freshVariable
@@ -234,26 +229,16 @@ pta ignore m = do
             acc' <- addVirtualConstraints acc sa sv
             return $ c1 : c2 : c3 : acc' `traceConstraints` ("Inst: " ++ show i, [c1,c2,c3])
 
-        CallInst { callFunction = (valueContent' -> FunctionC f)
-                 , callArguments = (map fst -> args)
-                 } -> directCallConstraints acc i f args
-        InvokeInst { invokeFunction = (valueContent' -> FunctionC f)
-                   , invokeArguments = (map fst -> args)
-                   } -> directCallConstraints acc i f args
+        Call _ _ (Value _ _ (ValSymbol (SymValDefine f))) args -> directCallConstraints acc (toValue i) f args
+        Invoke _ (Value _ _ (ValSymbol (SymValDefine f))) args _ _ -> directCallConstraints acc (toValue i) f args
         -- For now, don't model calls to external functions
-        CallInst { callFunction = (valueContent' -> ExternalFunctionC _) } ->
-          return acc
-        InvokeInst { invokeFunction = (valueContent' -> ExternalFunctionC _) } ->
-          return acc
-        CallInst { callFunction = callee, callArguments = (map fst -> args) } ->
-          indirectCallConstraints acc callee args
-        InvokeInst { invokeFunction = callee, invokeArguments = (map fst -> args) } ->
-          indirectCallConstraints acc callee args
+        Call _ _ (Value _ _ (ValSymbol (SymValDeclare _))) _ -> return acc
+        Invoke _ (Value _ _ (ValSymbol (SymValDeclare _))) _ _ _ -> return acc
+        Call _ _ callee args -> indirectCallConstraints acc callee args
+        Invoke _ callee args _ _ -> indirectCallConstraints acc callee args
 
-        SelectInst { selectTrueValue = tv, selectFalseValue = fv } ->
-          foldM (valueAliasingChoise i) acc [ tv, fv ]
-        PhiNode { phiIncomingValues = ivs } ->
-          foldM (valueAliasingChoise i) acc (map fst ivs)
+        Select _ tv fv -> foldM (valueAliasingChoise (toValue i)) acc [ tv, fv ]
+        Phi _ ivs -> foldM (valueAliasingChoise (toValue i)) acc (map fst ivs)
 
         -- FIXME: Add a case handling bitcasts.  If one type is
         -- bitcast to a related type, add equivalences between all of
@@ -270,10 +255,7 @@ pta ignore m = do
         -- the constraints into the proper place in the constraint
         -- graph.  It may be possible to keep it entirely local with
         -- extra variables as is done for function pointers.
-        GetElementPtrInst { getElementPtrValue = (valueContent' ->
-          InstructionC LoadInst { loadAddress = la })
-                          , getElementPtrIndices = [_]
-                          }
+        GEP _ (ValInstr (Load la _ _)) [_]
           | ignore la || ignore (toValue i) -> return acc
           | otherwise -> do
             f1 <- freshVariable
@@ -286,9 +268,7 @@ pta ignore m = do
             acc' <- addVirtualConstraints acc (toValue i) la
             return $ c1 : c2 : c3 : acc' `traceConstraints` (concat ["GEP: " ++ show i], [c1,c2,c3])
 
-        GetElementPtrInst { getElementPtrValue = base
-                          , getElementPtrIndices = [_]
-                          }
+        GEP _ base [_]
           | ignore base || ignore (toValue i) -> return acc
           | otherwise -> do
             f1 <- freshVariable
@@ -301,13 +281,9 @@ pta ignore m = do
             acc' <- addVirtualConstraints acc (toValue i) base
             return $ c1 : c2 : c3 : acc' `traceConstraints` (concat ["GEP: " ++ show i], [c1,c2,c3])
 
-        GetElementPtrInst { getElementPtrValue = base,
-                            getElementPtrIndices = [(valueContent -> ConstantC ConstantInt { constantIntValue = 0 })
-                                                   , _
-                                                   ]
-                          } ->
-          case valueType base of
-            TypePointer (TypeArray _ _) _ -> do
+        GEP _ base [Value _ _ (ValInteger 0), _] ->
+          case valType base of
+            PtrTo Array {} -> do
               f1 <- freshVariable
               f2 <- freshVariable
 
@@ -325,11 +301,11 @@ pta ignore m = do
         _ -> return acc
 
     directCallConstraints acc i f actuals = do
-      let formals = functionParameters f
+      let formals = defArgs f
       acc' <- foldM copyActualToFormal acc (zip actuals formals)
-      case valueType i of
-        TypePointer _ _ | not (ignore (toValue i)) -> do
-          let rvs = mapMaybe extractRetVal (functionExitInstructions f)
+      case valType i of
+        PtrTo _ | not (ignore (toValue i)) -> do
+          let rvs = mapMaybe extractRetVal (defExitStmts f)
           cs <- foldM (retConstraint i) [] rvs
           return $ cs ++ acc'
         _ -> return acc'
@@ -350,16 +326,16 @@ pta ignore m = do
     --   return $ c : acc `traceConstraints` (concat ["ArrayVar: ", show src, " -> ", show dst], [c])
 
     addVirtualArgConstraints acc sa sv
-      | not (isFuncPtrType (valueType sv)) = return acc
+      | not (isFuncPtrType (valType sv)) = return acc
       | otherwise =
-        case valueContent' sv of
+        case sv of
           -- Connect the virtuals for sa to the actuals of f
-          FunctionC f -> do
-            let formals = functionParameters f
+          Value _ _ (ValSymbol (SymValDefine f)) -> do
+            let formals = defArgs f
             foldM (constrainVirtualArg sa) acc (zip [0..] formals)
           -- Otherwise, copy virtuals from old ref to new ref
           _ -> do
-            let nparams = functionTypeParameters (valueType sv)
+            let nparams = functionTypeParameters (valType sv)
             foldM (virtVirtArg sa sv) acc [0..(nparams - 1)]
 
     virtVirtArg sa sv acc ix = do
@@ -367,6 +343,7 @@ pta ignore m = do
           c2 = virtArgVar sv ix <=! virtArgVar sa ix
       return $ c1 : c2 : acc `traceConstraints` (concat ["VirtVirt: ", show ix, "(", show sa, " -> ", show sv, ")"], [c1, c2])
 
+    -- constrainVirtualArg :: Value -> [Inclusion Var Constructor] -> (Int, Typed Ident) -> [Inclusion Var Constructor]
     constrainVirtualArg sa acc (ix, frml) = do
       let c = virtArgVar sa ix <=! argVar frml
       return $ c : acc `traceConstraints` (concat ["VirtArg: ", show ix, "(", show sa, ")"], [c])
@@ -421,22 +398,22 @@ pta ignore m = do
 -- by the GEP instruction with the given base and indices.
 fieldDescriptor :: Value -> [Value] -> Maybe (Type, Int)
 fieldDescriptor base ixs =
-  case (valueType base, ixs) of
+  case (valType base, ixs) of
     -- A pointer being accessed as an array
     (_, [_]) -> Nothing
     -- An actual array type (first index should be zero here)
-    (TypePointer (TypeArray _ _) _, (valueContent' -> ConstantC ConstantInt { constantIntValue = 0 }):_) ->
+    (PtrTo Array {}, Value _ _ (ValInteger 0):_) ->
       Nothing
     -- It doesn't matter what the first index is; even if it isn't
     -- zero (as in it *is* an array access), we only care about the
     -- ultimate field access and not the array.  Raw arrays are taken
     -- care of above.
-    (TypePointer t _, _:rest) -> return $ walkType t rest
+    (PtrTo t, _:rest) -> return $ walkType t rest
     _ -> Nothing
 
 walkType :: Type -> [Value] -> (Type, Int)
 walkType t [] = error ("LLVM.Analysis.PointsTo.Andersen.walkType: expected non-empty index list for " ++ show t)
-walkType t [(valueContent -> ConstantC ConstantInt { constantIntValue = iv })] =
+walkType t [Value _ _ (ValInteger iv)] =
   (t, fromIntegral iv)
 walkType t (ix:ixs) =
   case t of
@@ -444,10 +421,10 @@ walkType t (ix:ixs) =
     -- terminal struct index.  Note that if there are no further
     -- struct types (e.g., this is an array member of a struct), we
     -- need to return the index of the array... FIXME
-    TypeArray _ t' -> walkType t' ixs
-    TypeStruct _ ts _ ->
-      case valueContent ix of
-        ConstantC ConstantInt { constantIntValue = (fromIntegral -> iv) } ->
+    Array _ t' -> walkType t' ixs
+    Struct _ ts _ ->
+      case valValue ix of
+        ValInteger (fromIntegral -> iv) ->
           case iv < length ts of
             True -> walkType (ts !! iv) ixs
             False -> error ("LLVM.Analysis.PointsTo.Andersen.walkType: index out of range " ++ show iv ++ " in " ++ show t)
@@ -455,16 +432,12 @@ walkType t (ix:ixs) =
     _ -> error ("LLVM.Analysis.PointsTo.Andersen.walkType: unexpected type " ++ show ix ++ " in " ++ show t)
 
 isConstantZero :: Value -> Bool
-isConstantZero v =
-  case valueContent' v of
-    ConstantC ConstantInt { constantIntValue = 0 } -> True
-    _ -> False
+isConstantZero (Value _ _ (ValInteger 0)) = True
+isConstantZero _ = False
 
 getTargetIfLoad :: Value -> Value
-getTargetIfLoad v =
-  case valueContent' v of
-    InstructionC LoadInst { loadAddress = la } -> la
-    _ -> v
+getTargetIfLoad (ValInstr (Load la _ _)) = la
+getTargetIfLoad v = v
 
 -- TODO:
 --
@@ -485,19 +458,19 @@ traceConstraints = const
 isFuncPtrType :: Type -> Bool
 isFuncPtrType t =
   case t of
-    TypeFunction _ _ _ -> True
-    TypePointer t' _ -> isFuncPtrType t'
+    FunTy {} -> True
+    PtrTo t' -> isFuncPtrType t'
     _ -> False
 
 functionTypeParameters :: Type -> Int
 functionTypeParameters t =
   case t of
-    TypeFunction _ ts _ -> length ts
-    TypePointer t' _ -> functionTypeParameters t'
+    FunTy _ ts _ -> length ts
+    PtrTo t' -> functionTypeParameters t'
     _ -> -1
 
-extractRetVal :: Instruction -> Maybe Value
-extractRetVal RetInst { retInstValue = rv } = rv
+extractRetVal :: Stmt -> Maybe Value
+extractRetVal Stmt {stmtInstr = Ret rv} = Just rv
 extractRetVal _ = Nothing
 
 throwErr :: ConstraintError Var Constructor -> SolvedSystem Var Constructor
@@ -505,57 +478,55 @@ throwErr = throw
 
 -- Debugging
 
-{-
-instance ToGraphviz Andersen where
-  toGraphviz = andersenConstraintGraph
-
-andersenConstraintGraph :: Andersen -> DotGraph Int
-andersenConstraintGraph (Andersen s) =
-  let (ns, es) = solvedSystemGraphElems s
-  in graphElemsToDot andersenParams ns es
-
-andersenParams :: GraphvizParams Int (SetExpression Var Constructor) ConstraintEdge () (SetExpression Var Constructor)
-andersenParams = defaultParams { isDirected = True
-                               , fmtNode = fmtAndersenNode
-                               , fmtEdge = fmtAndersenEdge
-                               }
-
-fmtAndersenNode :: (a, SetExpression Var Constructor) -> [Attribute]
-fmtAndersenNode (_, l) =
-  case l of
-    EmptySet -> [toLabel (show l)]
-    UniversalSet -> [toLabel (show l)]
-    SetVariable (FieldLoc t ix) ->
-      [toLabel ("Field_" ++ unpack t ++ "<" ++ show ix ++ ">")]
-    SetVariable (Fresh i) -> [toLabel ("F" ++ show i)]
-    SetVariable (PhiCopy i) -> [toLabel ("PhiCopy " ++ show i)]
-    SetVariable (GEPLocation i) -> [toLabel ("GEPLoc " ++ show i)]
-    SetVariable (VirtualArg sa ix) ->
-      [toLabel ("VA_" ++ show ix ++ "[" ++ show (valueName sa) ++ "]")]
-    SetVariable (VirtualFieldArg t fld ix) ->
-      [toLabel ("VAField_" ++ show ix ++ "[" ++ show t ++ ".<" ++ show fld ++ ">]")]
-    SetVariable (LocationSet v) ->
-      case valueName v of
-        Nothing -> [toLabel ("X_" ++ show v)]
-        Just vn -> [toLabel ("X_" ++ identifierAsString vn)]
-    SetVariable (ArgLocation a) ->
-      [toLabel ("AL_" ++ show (argumentName a))]
-    SetVariable (RetLocation i) ->
-      [toLabel ("RV_" ++ show (valueName (callFunction i)))]
-    SetVariable (LoadedLocation i) ->
-      case valueName i of
-        Nothing -> error "Loads should have names"
-        Just ln -> [toLabel ("LL_" ++ identifierAsString ln)]
-    ConstructedTerm Ref _ [ConstructedTerm (Atom v) _ _, _, _] ->
-      let vn = maybe (show v) identifierAsString (valueName v)
-      in [toLabel $ concat [ "Ref( l_", vn, ", X_", vn, ", X_", vn ]]
-    ConstructedTerm (Atom a) _ _ ->
-      [toLabel (show a)]
-    ConstructedTerm _ _ _ -> [toLabel (show l)]
-
-fmtAndersenEdge :: (a, a, ConstraintEdge) -> [Attribute]
-fmtAndersenEdge (_, _, lbl) =
-  case lbl of
-    Succ -> [style solid]
-    Pred -> [style dashed]
--}
+-- instance ToGraphviz Andersen where
+--   toGraphviz = andersenConstraintGraph
+-- 
+-- andersenConstraintGraph :: Andersen -> DotGraph Int
+-- andersenConstraintGraph (Andersen s) =
+--   let (ns, es) = solvedSystemGraphElems s
+--   in graphElemsToDot andersenParams ns es
+-- 
+-- andersenParams :: GraphvizParams Int (SetExpression Var Constructor) ConstraintEdge () (SetExpression Var Constructor)
+-- andersenParams = defaultParams { isDirected = True
+--                                , fmtNode = fmtAndersenNode
+--                                , fmtEdge = fmtAndersenEdge
+--                                }
+-- 
+-- fmtAndersenNode :: (a, SetExpression Var Constructor) -> [Attribute]
+-- fmtAndersenNode (_, l) =
+--   case l of
+--     EmptySet -> [toLabel (show l)]
+--     UniversalSet -> [toLabel (show l)]
+--     SetVariable (FieldLoc t ix) ->
+--       [toLabel ("Field_" ++ unpack t ++ "<" ++ show ix ++ ">")]
+--     SetVariable (Fresh i) -> [toLabel ("F" ++ show i)]
+--     SetVariable (PhiCopy i) -> [toLabel ("PhiCopy " ++ show i)]
+--     SetVariable (GEPLocation i) -> [toLabel ("GEPLoc " ++ show i)]
+--     SetVariable (VirtualArg sa ix) ->
+--       [toLabel ("VA_" ++ show ix ++ "[" ++ show (valueName sa) ++ "]")]
+--     SetVariable (VirtualFieldArg t fld ix) ->
+--       [toLabel ("VAField_" ++ show ix ++ "[" ++ show t ++ ".<" ++ show fld ++ ">]")]
+--     SetVariable (LocationSet v) ->
+--       case valueName v of
+--         Nothing -> [toLabel ("X_" ++ show v)]
+--         Just vn -> [toLabel ("X_" ++ identifierAsString vn)]
+--     SetVariable (ArgLocation a) ->
+--       [toLabel ("AL_" ++ show (argumentName a))]
+--     SetVariable (RetLocation i) ->
+--       [toLabel ("RV_" ++ show (valueName (callFunction i)))]
+--     SetVariable (LoadedLocation i) ->
+--       case valueName i of
+--         Nothing -> error "Loads should have names"
+--         Just ln -> [toLabel ("LL_" ++ identifierAsString ln)]
+--     ConstructedTerm Ref _ [ConstructedTerm (Atom v) _ _, _, _] ->
+--       let vn = maybe (show v) identifierAsString (valueName v)
+--       in [toLabel $ concat [ "Ref( l_", vn, ", X_", vn, ", X_", vn ]]
+--     ConstructedTerm (Atom a) _ _ ->
+--       [toLabel (show a)]
+--     ConstructedTerm _ _ _ -> [toLabel (show l)]
+-- 
+-- fmtAndersenEdge :: (a, a, ConstraintEdge) -> [Attribute]
+-- fmtAndersenEdge (_, _, lbl) =
+--   case lbl of
+--     Succ -> [style solid]
+--     Pred -> [style dashed]

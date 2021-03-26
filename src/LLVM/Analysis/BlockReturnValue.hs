@@ -26,13 +26,11 @@ module LLVM.Analysis.BlockReturnValue (
   instructionReturns
   ) where
 
-import Control.Arrow ( second )
 import Data.HashMap.Strict ( HashMap )
 import qualified Data.HashMap.Strict as HM
 import Data.HashSet ( HashSet )
 import qualified Data.HashSet as HS
 import Data.Maybe ( mapMaybe )
-import Data.Monoid
 
 import LLVM.Analysis
 import LLVM.Analysis.CFG
@@ -50,7 +48,10 @@ instance HasBlockReturns BlockReturns where
 instance Show BlockReturns where
   show (BlockReturns _ m _) = unlines $ map showPair (HM.toList m)
     where
-      showPair (bb, vs) = show (basicBlockName bb) ++ ": " ++ show vs
+      showPair (bb, vs) = show (bbName bb) ++ ": " ++ show vs
+
+instance Semigroup BlockReturns where
+  (<>) = mappend
 
 instance Monoid BlockReturns where
   mempty = BlockReturns mempty mempty mempty
@@ -76,22 +77,20 @@ blockReturns brs bb
 
 -- | Return the Value that must be returned (if any) if the given
 -- Instruction is executed.
-instructionReturn :: (HasBlockReturns brs) => brs -> Instruction -> Maybe Value
+instructionReturn :: (HasBlockReturns brs) => brs -> Stmt -> Maybe Value
 instructionReturn brs i = do
-  bb <- instructionBasicBlock i
+  let bb = stmtBasicBlock i
   blockReturn (getBlockReturns brs) bb
 
-instructionReturns :: (HasBlockReturns brs) => brs -> Instruction -> Maybe [Value]
-instructionReturns brs i = blockReturns (getBlockReturns brs) bb
-  where
-    Just bb = instructionBasicBlock i
+instructionReturns :: (HasBlockReturns brs) => brs -> Stmt -> Maybe [Value]
+instructionReturns brs i = blockReturns (getBlockReturns brs) (stmtBasicBlock i)
 
 -- | Label each BasicBlock with the value that it must return (if
 -- any).
-labelBlockReturns :: (HasFunction funcLike, HasPostdomTree funcLike, HasCFG funcLike)
+labelBlockReturns :: (HasDefine funcLike, HasPostdomTree funcLike, HasCFG funcLike)
                 => funcLike -> BlockReturns
 labelBlockReturns funcLike =
-  case functionExitInstructions f of
+  case defExitStmts f of
     [] -> BlockReturns mempty mempty mempty
     exitInsts ->
       let s0 = (mempty, mempty, mempty)
@@ -103,26 +102,27 @@ labelBlockReturns funcLike =
           compositeRets = foldr accumulateSuccReturns cs0 (reverse blocks)
       in BlockReturns singleBlockRets compositeRets poisonedBlocks
   where
-    f = getFunction funcLike
+    f = getDefine funcLike
     pdt = getPostdomTree funcLike
     cfg = getCFG funcLike
-    blocks = functionBody f
+    blocks = defBody f
 
-    pushReturnValues exitInst (m, pois, vis) =
-      let Just b0 = instructionBasicBlock exitInst
-      in case exitInst of
-        RetInst { retInstValue = Just rv } ->
+    pushReturnValues exitStmt (m, pois, vis) =
+      let b0 = stmtBasicBlock exitStmt
+      in case exitStmt of
+        Stmt { stmtInstr = Ret rv } ->
           pushReturnUp Nothing (rv, b0) (m, pois, vis)
         _ -> (m, pois, vis)
+    pushReturnUp :: Maybe BasicBlock -> (Value, BasicBlock) -> (HashMap BasicBlock Value, HashSet BasicBlock, HashSet BasicBlock) -> (HashMap BasicBlock Value, HashSet BasicBlock, HashSet BasicBlock)
     pushReturnUp prevBlock (val, bb) acc@(m, pois, vis)
       | HS.member bb vis = acc
       | not (prevTerminatorPostdominates pdt prevBlock bb) =
         (m, HS.insert bb pois, HS.insert bb vis)
       | otherwise =
-        case valueContent' val of
-          InstructionC PhiNode { phiIncomingValues = ivs } ->
+        case valValue val of
+          ValIdent (IdentValStmt Stmt { stmtInstr = Phi _ ivs }) ->
             let vis' = HS.insert bb vis
-            in foldr (pushReturnUp (Just bb) . second toBB) (m, pois, vis') ivs
+            in foldr (pushReturnUp (Just bb)) (m, pois, vis') ivs
           _ ->
             let m' = HM.insert bb val m
                 vis' = HS.insert bb vis
@@ -131,10 +131,10 @@ labelBlockReturns funcLike =
 
     accumulateSuccReturns b acc =
       let succs = basicBlockSuccessors cfg b
-          succRets = mapMaybe (\s -> HM.lookup s acc) succs
-      in case null succRets of
-        True -> acc
-        False -> HM.insert b (mconcat succRets) acc
+          succRets = mapMaybe (`HM.lookup` acc) succs
+      in if null succRets
+        then acc
+        else HM.insert b (mconcat succRets) acc
 
 -- | Return True if the terminator instruction of the previous block
 -- in the traversal postdominates the terminator instruction of the
@@ -144,14 +144,5 @@ prevTerminatorPostdominates _ Nothing _ = True
 prevTerminatorPostdominates pdt (Just prevBlock) bb =
   postdominates pdt prevTerm bbTerm
   where
-    prevTerm = basicBlockTerminatorInstruction prevBlock
-    bbTerm = basicBlockTerminatorInstruction bb
-
--- | Unconditionally convert a Value to a BasicBlock.  This should
--- always work for the second value of each Phi incoming value.  There
--- may be some cases with blockaddresses that fail...
-toBB :: Value -> BasicBlock
-toBB v =
-  case valueContent v of
-    BasicBlockC bb -> bb
-    _ -> error "LLVM.Analysis.BlockReturnValue.toBB: not a basic block"
+    prevTerm = bbTerminatorStmt prevBlock
+    bbTerm = bbTerminatorStmt bb

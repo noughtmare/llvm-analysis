@@ -19,6 +19,7 @@ import qualified Data.Set as S
 
 import LLVM.Analysis
 import LLVM.Analysis.PointsTo
+import LLVM.Analysis (IsValue (..))
 
 -- | The result of the TrivialFunction points-to analysis.  It is an
 -- instance of the 'PointsToAnalysis' typeclass and is intended to be
@@ -38,18 +39,18 @@ instance PointsToAnalysis TrivialFunction where
 runPointsToAnalysis :: Module -> TrivialFunction
 runPointsToAnalysis m = TrivialFunction finalMap
   where
-    externMap = foldr buildMap M.empty (moduleExternalFunctions m)
-    finalMap = foldr buildMap externMap (moduleDefinedFunctions m)
+    externMap = foldr buildMap M.empty (modDeclares m)
+    finalMap = foldr buildMap externMap (modDefines m)
 
 -- | Add function-typed values to the result map.
 buildMap :: (IsValue a) => a -> HashMap Type (Set Value) -> HashMap Type (Set Value)
 buildMap v =
   M.insertWith S.union vtype (S.singleton (toValue v))
   where
-    vtype = valueType v
+    vtype = valType (toValue v)
 
 trivialMayAlias :: TrivialFunction -> Value -> Value -> Bool
-trivialMayAlias _ v1 v2 = valueType v1 == valueType v2
+trivialMayAlias _ v1 v2 = valType v1 == valType v2
 
 -- Note, don't use the bitcast stripping functions here since we need
 -- the surface types of functions.  This affects cases where function
@@ -57,19 +58,19 @@ trivialMayAlias _ v1 v2 = valueType v1 == valueType v2
 -- casted back to their original type.
 trivialPointsTo :: TrivialFunction -> Value -> [Value]
 trivialPointsTo p@(TrivialFunction m) v =
-  case valueContent v of
-    FunctionC _ -> [v]
-    ExternalFunctionC _ -> [v]
-    GlobalAliasC ga -> trivialPointsTo p (toValue ga)
-    InstructionC BitcastInst { castedValue = c } ->
-      case valueContent c of
-        FunctionC _ -> trivialPointsTo p c
-        ExternalFunctionC _ -> trivialPointsTo p c
-        GlobalAliasC _ -> trivialPointsTo p c
+  case v of
+    Value _ _ (ValSymbol SymValDefine {}) -> [v]
+    Value _ _ (ValSymbol SymValDeclare {}) -> [v]
+    Value _ _ (ValSymbol (SymValAlias ga)) -> trivialPointsTo p (toValue ga)
+    ValInstr (Conv BitCast c _) ->
+      case c of
+        Value _ _ (ValSymbol SymValDefine {}) -> trivialPointsTo p c
+        Value _ _ (ValSymbol SymValDeclare {}) -> trivialPointsTo p c
+        Value _ _ (ValSymbol SymValAlias {}) -> trivialPointsTo p c
         _ -> S.toList $ M.lookupDefault S.empty (derefPointer v) m
     _ -> S.toList $ M.lookupDefault S.empty (derefPointer v) m
 
 derefPointer :: Value -> Type
-derefPointer v = case valueType v of
-  TypePointer p _ -> p
+derefPointer v = case valType v of
+  PtrTo p -> p
   _ -> error ("LLVM.Analysis.PointsTo.TrivialPointer.derefPointer: Non-pointer type given to trivalPointsTo: " ++ show v)

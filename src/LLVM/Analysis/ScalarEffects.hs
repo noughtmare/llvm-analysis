@@ -63,7 +63,7 @@ meet (SI s1) (SI s2) = SI (HM.unionWith mergeEffect s1 s2)
     mergeEffect e1 e2 = if e1 == e2 then e1 else Nothing
 
 -- For each function, initialize all arguments to Nothing
-scalarEffectAnalysis :: (Monad m, HasCFG funcLike, HasFunction funcLike)
+scalarEffectAnalysis :: (Monad m, HasCFG funcLike, HasDefine funcLike)
                         => funcLike
                         -> ScalarEffectResult
                         -> m ScalarEffectResult
@@ -84,79 +84,67 @@ discardNothings :: HashMap Argument ScalarEffect
 discardNothings acc _ Nothing = acc
 discardNothings acc a (Just e) = HM.insert a e acc
 
-scalarTransfer :: (Monad m) => ScalarInfo -> Instruction -> m ScalarInfo
+scalarTransfer :: (Monad m) => ScalarInfo -> Stmt -> m ScalarInfo
 scalarTransfer si i =
-  case i of
-    AtomicRMWInst { atomicRMWOperation = AOAdd
-                  , atomicRMWValue =
-      (valueContent -> ConstantC ConstantInt { constantIntValue = 1 })} ->
+  case stmtInstr i of
+    AtomicRW _ AtomicAdd _ (Value _ _ (ValInteger 1)) _ _ ->
       recordIfAffectsArgument EffectAdd1 i si
-    AtomicRMWInst { atomicRMWOperation = AOAdd
-                  , atomicRMWValue =
-      (valueContent -> ConstantC ConstantInt { constantIntValue = -1 })} ->
+    AtomicRW _ AtomicAdd _ (Value _ _ (ValInteger (-1))) _ _ ->
       recordIfAffectsArgument EffectSub1 i si
-    AtomicRMWInst { atomicRMWOperation = AOSub
-                  , atomicRMWValue =
-      (valueContent -> ConstantC ConstantInt { constantIntValue = 1 })} ->
+    AtomicRW _ AtomicSub _ (Value _ _ (ValInteger 1)) _ _ ->
       recordIfAffectsArgument EffectSub1 i si
-    AtomicRMWInst { atomicRMWOperation = AOSub
-                  , atomicRMWValue =
-      (valueContent -> ConstantC ConstantInt { constantIntValue = -1 })} ->
+    AtomicRW _ AtomicSub _ (Value _ _ (ValInteger (-1))) _ _ ->
       recordIfAffectsArgument EffectAdd1 i si
-    StoreInst { storeAddress = sa, storeValue = sv } ->
-      case isNonAtomicAdd sa sv of
-        False ->
-          case isNonAtomicSub sa sv of
-            False -> return si
-            True -> recordIfAffectsArgument EffectSub1 i si
-        True -> recordIfAffectsArgument EffectAdd1 i si
+    Store sv sa _ _
+      | isNonAtomicAdd sa sv -> recordIfAffectsArgument EffectAdd1 i si
+      | isNonAtomicSub sa sv -> recordIfAffectsArgument EffectSub1 i si
     _ -> return si
 
 isNonAtomicSub :: (IsValue a) => Value -> a -> Bool
 isNonAtomicSub sa sv =
-  case valueContent sv of
-    InstructionC AddInst {
-      binaryLhs = (valueContent -> ConstantC ConstantInt { constantIntValue = -1 }),
-      binaryRhs = (valueContent -> InstructionC LoadInst { loadAddress = la }) } ->
+  case toValue sv of
+    ValInstr (Arith Sub {}
+      (Value _ _ (ValInteger (-1)))
+      (ValInstr (Load la _ _))) ->
       sa == la
-    InstructionC AddInst {
-      binaryRhs = (valueContent -> ConstantC ConstantInt { constantIntValue = -1 }),
-      binaryLhs = (valueContent -> InstructionC LoadInst { loadAddress = la }) } ->
+    ValInstr (Arith Sub {}
+      (ValInstr (Load la _ _))
+      (Value _ _ (ValInteger (-1)))) ->
       sa == la
-    InstructionC SubInst {
-      binaryRhs = (valueContent -> ConstantC ConstantInt { constantIntValue = 1 }),
-      binaryLhs = (valueContent -> InstructionC LoadInst { loadAddress = la }) } ->
+    ValInstr (Arith Add {}
+      (ValInstr (Load la _ _))
+      (Value _ _ (ValInteger 1))) ->
       sa == la
     _ -> False
 
 isNonAtomicAdd :: (IsValue a) => Value -> a -> Bool
 isNonAtomicAdd sa sv =
-  case valueContent sv of
-    InstructionC AddInst {
-      binaryLhs = (valueContent -> ConstantC ConstantInt { constantIntValue = 1 }),
-      binaryRhs = (valueContent -> InstructionC LoadInst { loadAddress = la }) } ->
+  case toValue sv of
+    ValInstr (Arith Add {}
+      (Value _ _ (ValInteger 1))
+      (ValInstr (Load la _ _))) ->
       sa == la
-    InstructionC AddInst {
-      binaryRhs = (valueContent -> ConstantC ConstantInt { constantIntValue = 1 }),
-      binaryLhs = (valueContent -> InstructionC LoadInst { loadAddress = la }) } ->
+    ValInstr (Arith Add {}
+      (ValInstr (Load la _ _))
+      (Value _ _ (ValInteger 1))) ->
       sa == la
-    InstructionC SubInst {
-      binaryRhs = (valueContent -> ConstantC ConstantInt { constantIntValue = -1 }),
-      binaryLhs = (valueContent -> InstructionC LoadInst { loadAddress = la }) } ->
+    ValInstr (Arith Sub {}
+      (ValInstr (Load la _ _))
+      (Value _ _ (ValInteger (-1)))) ->
       sa == la
     _ -> False
 
 recordIfAffectsArgument :: (Monad m)
                            => (AbstractAccessPath -> ScalarEffect)
-                           -> Instruction
+                           -> Stmt
                            -> ScalarInfo
                            -> m ScalarInfo
 recordIfAffectsArgument con i si =
   case accessPath i of
     Nothing -> return si
     Just cap ->
-      case valueContent' (accessPathBaseValue cap) of
-        ArgumentC a ->
+      case valValue (accessPathBaseValue cap) of
+        ValIdent (IdentValArgument a) ->
           let e = Just $ con (abstractAccessPath cap)
           in case si of
             SITop -> return $! SI $ HM.insert a e HM.empty

@@ -5,14 +5,14 @@ module LLVM.Analysis.UsesOf (
   ) where
 
 import qualified Data.Foldable as F
-import Data.HashMap.Strict ( HashMap )
-import qualified Data.HashMap.Strict as HM
-import qualified Data.HashSet as HS
+import qualified Data.Set as S
+import qualified Data.Map.Strict as M
+import Data.Map.Strict (Map)
 import Data.Maybe ( fromMaybe )
 
 import LLVM.Analysis
 
-data UseSummary = UseSummary (HashMap Value [Instruction])
+newtype UseSummary = UseSummary (Map Value [Instr])
 
 -- | Compute the uses of every value in the 'Module'
 --
@@ -26,17 +26,17 @@ data UseSummary = UseSummary (HashMap Value [Instruction])
 -- Note that this is a simple index.  It does not look through bitcasts
 -- at all.
 computeUsesOf :: Module -> UseSummary
-computeUsesOf m = UseSummary $ fmap HS.toList uses
+computeUsesOf m = UseSummary $ fmap S.toList uses
   where
-    uses = F.foldl' funcUses HM.empty fs
-    fs = moduleDefinedFunctions m
-    funcUses acc f = F.foldl' addInstUses acc (functionInstructions f)
+    uses = F.foldl' funcUses M.empty fs
+    fs = modDefines m
+    funcUses acc f = F.foldl' addInstUses acc (map stmtInstr (defStmts f))
     addInstUses acc i = F.foldl' (addUses i) acc (instructionOperands i)
-    addUses i acc v = HM.insertWith HS.union v (HS.singleton i) acc
+    addUses i acc v = M.insertWith S.union v (S.singleton i) acc
 
 -- | > usedBy summ val
 --
 -- Find the instructions using @val@ in the function that @summ@ was
 -- computed for.
-usedBy :: UseSummary -> Value -> [Instruction]
-usedBy (UseSummary m) v = fromMaybe [] $ HM.lookup v m
+usedBy :: UseSummary -> Value -> [Instr]
+usedBy (UseSummary m) v = fromMaybe [] $ M.lookup v m

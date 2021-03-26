@@ -47,25 +47,25 @@ meet _ WillNeverReturn = WillNeverReturn
 meet NotReturned NotReturned = NotReturned
 
 data AnalysisEnvironment m =
-  AE { externalSummary :: ExternalFunction -> m Bool
-     , internalSummary :: HashSet Function
+  AE { externalSummary :: Declare -> m Bool
+     , internalSummary :: HashSet Define
      }
 
 -- | The analysis monad is just a Reader whose environment is a function
--- to test ExternalFunctions
+-- to test Declares
 type AnalysisMonad m = ReaderT (AnalysisEnvironment m) m
 
 -- | The functions in the returned set are those that do not return.
 --
 -- Warning, this return type may become abstract at some point.
 noReturnAnalysis :: (Monad m, HasCFG cfg)
-                    => (ExternalFunction -> m Bool)
+                    => (Declare -> m Bool)
                     -> cfg
-                    -> HashSet Function
-                    -> m (HashSet Function)
+                    -> HashSet Define
+                    -> m (HashSet Define)
 noReturnAnalysis extSummary cfgLike summ = do
   let cfg = getCFG cfgLike
-      f = getFunction cfg
+      f = getDefine cfg
       env = AE extSummary summ
       analysis = fwdDataflowAnalysis NotReturned meet returnTransfer
   localRes <- runReaderT (dataflow cfg analysis NotReturned) env
@@ -74,27 +74,27 @@ noReturnAnalysis extSummary cfgLike summ = do
     NotReturned -> return $! S.insert f summ
     Returned -> return summ
 
-returnTransfer :: (Monad m) => ReturnInfo -> Instruction -> AnalysisMonad m ReturnInfo
+returnTransfer :: (Monad m) => ReturnInfo -> Stmt -> AnalysisMonad m ReturnInfo
 returnTransfer ri i =
-  case i of
-    CallInst { callFunction = calledFunc } ->
+  case stmtInstr i of
+    Call _ _ (Value _ _ (ValSymbol calledFunc)) _ ->
       dispatchCall ri calledFunc
-    InvokeInst { invokeFunction = calledFunc } ->
+    Invoke _ (Value _ _ (ValSymbol calledFunc)) _ _ _ ->
       dispatchCall ri calledFunc
-    UnreachableInst {} -> return WillNeverReturn
-    ResumeInst {} -> return WillNeverReturn
-    RetInst {} -> return Returned
+    Unreachable {} -> return WillNeverReturn
+    Resume {} -> return WillNeverReturn
+    Ret {} -> return Returned
     _ -> return ri
 
-dispatchCall :: (Monad m) => ReturnInfo -> Value -> AnalysisMonad m ReturnInfo
+dispatchCall :: (Monad m) => ReturnInfo -> SymValue -> AnalysisMonad m ReturnInfo
 dispatchCall ri v =
-  case valueContent' v of
-    FunctionC f -> do
+  case v of
+    SymValDefine f -> do
       intSumm <- asks internalSummary
       case S.member f intSumm of
         True -> return WillNeverReturn
         False -> return ri
-    ExternalFunctionC ef -> do
+    SymValDeclare ef -> do
       extSumm <- asks externalSummary
       isNoRet <- lift $ extSumm ef
       case isNoRet of

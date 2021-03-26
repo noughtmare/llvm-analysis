@@ -20,11 +20,8 @@ import LLVM.Analysis
 --
 -- This function returns True if the given instruction must be a call
 -- to a standard C library allocation function.
-standardCProfile :: Instruction -> Bool
-standardCProfile CallInst { callFunction = cf } =
-  case valueContent cf of
-    ExternalFunctionC ef ->
-      let ident = identifierContent (externalFunctionName ef)
-      in ident == "malloc" || ident == "calloc" || ident == "alloca"
-    _ -> False
+standardCProfile :: Instr -> Bool
+standardCProfile (Call _ _ (Value _ _ (ValSymbol (SymValDeclare ef))) _) =
+  let Symbol ident = decName ef
+  in ident == "malloc" || ident == "calloc" || ident == "alloca"
 standardCProfile _ = False

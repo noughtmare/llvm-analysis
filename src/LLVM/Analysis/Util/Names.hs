@@ -18,7 +18,7 @@ import Text.Boomerang.String
 import ABI.Itanium as ABI
 import LLVM.Analysis as LLVM
 
-parseFunctionName :: Function -> Either String Name
+parseFunctionName :: Define -> Either String Name
 parseFunctionName f =
   case demangleName fname of
     Left e -> Left e
@@ -26,7 +26,7 @@ parseFunctionName f =
     Right (ABI.OverrideThunk _ (ABI.Function sname _)) -> Right sname
     Right n -> Left ("Unexpected name: " ++ show n)
   where
-    fname = identifierAsString (functionName f)
+    Symbol fname = defName f
 
 unparseFunctionName :: Name -> Maybe String
 unparseFunctionName = unparseTypeName
@@ -40,21 +40,21 @@ parseTypeName s =
 unparseTypeName :: Name -> Maybe String
 unparseTypeName = unparseString name
 
-name :: PrinterParser StringError String a (Name :- a)
+name :: Boomerang StringError String a (Name :- a)
 name = ABI.rNestedName . rList qualifier . rList1 prefix . unqName <>
          ABI.rUnscopedName . unscopedName
 
 
-unscopedName :: PrinterParser StringError String a (UName :- a)
+unscopedName :: Boomerang StringError String a (UName :- a)
 unscopedName = ABI.rUName . unqName
 
-unqName :: PrinterParser StringError String a (UnqualifiedName :- a)
+unqName :: Boomerang StringError String a (UnqualifiedName :- a)
 unqName = ABI.rSourceName . rList1 (satisfy (/= ':'))
 
 -- Just a hack since we know we won't have qualifiers.  It is fine if
 -- it always fails because the empty list is allowed
-qualifier :: PrinterParser StringError String a (CVQualifier :- a)
+qualifier :: Boomerang StringError String a (CVQualifier :- a)
 qualifier = ABI.rConst . lit "@@INVALID@@"
 
-prefix :: PrinterParser StringError String a (Prefix :- a)
+prefix :: Boomerang StringError String a (Prefix :- a)
 prefix = ABI.rUnqualifiedPrefix . unqName . lit "::"

@@ -59,8 +59,8 @@ instance HasPostdomTree CDG where
 instance HasCFG CDG where
   getCFG = getCFG . getPostdomTree
 
-instance HasFunction CDG where
-  getFunction = getFunction . getCFG
+instance HasDefine CDG where
+  getDefine = getDefine . getCFG
 
 data CDG = CDG PostdominatorTree (Map BasicBlock [BasicBlock])
 
@@ -97,10 +97,10 @@ are /directly/ control dependent on.
 -- just isn't connected by a fake Start node.
 controlDependenceGraph :: (HasCFG f, HasPostdomTree f) => f -> CDG
 controlDependenceGraph flike =
-  CDG pdt $ fmap S.toList $ foldr addPairs mempty (functionBody f)
+  CDG pdt $ fmap S.toList $ foldr addPairs mempty (defBody f)
   where
     cfg = getCFG flike
-    f = getFunction cfg
+    f = getDefine cfg
     pdoms = M.fromList $ postdominators pdt
     pdt = getPostdomTree flike
     addPairs bM acc =
@@ -110,7 +110,7 @@ controlDependenceGraph flike =
 -- | Get the list of instructions that an instruction is control
 -- dependent upon.  As noted above, the list will be empty if the
 -- instruction is executed unconditionally.
-controlDependencies :: (HasCDG cdg) => cdg -> Instruction -> [Instruction]
+controlDependencies :: (HasCDG cdg) => cdg -> Stmt -> [Stmt]
 controlDependencies cdgLike i =
   go mempty (S.fromList directDeps) directDeps
   where
@@ -127,12 +127,12 @@ controlDependencies cdgLike i =
 
 -- | Get the list of instructions that an instruction is directly
 -- control dependent upon (direct parents in the CDG).
-directControlDependencies :: (HasCDG cdg) => cdg -> Instruction -> [Instruction]
+directControlDependencies :: (HasCDG cdg) => cdg -> Stmt -> [Stmt]
 directControlDependencies cdgLike i =
-  maybe [] (map basicBlockTerminatorInstruction) (M.lookup bb m)
+  maybe [] (map bbTerminatorStmt) (M.lookup bb m)
   where
     CDG _ m = getCDG cdgLike
-    Just bb = instructionBasicBlock i
+    bb = stmtBasicBlock i
 
 -- Implementation
 
@@ -141,7 +141,7 @@ directControlDependencies cdgLike i =
 -- first instruction of N does not postdominate the terminator
 -- instruction of M.
 addCDGEdge :: PostdominatorTree -- ^ The postdominator tree
-              -> Map Instruction [Instruction] -- ^ The entire postdom relation
+              -> Map Stmt [Stmt] -- ^ The entire postdom relation
               -> BasicBlock -- ^ M
               -> BasicBlock -- ^ N
               -> Map BasicBlock (Set BasicBlock)
@@ -162,8 +162,8 @@ addCDGEdge pdt pdoms bM bN acc
       in foldr addControlDep acc deps
   where
     addControlDep b = M.insertWith S.union b (S.singleton bM)
-    mTerm = basicBlockTerminatorInstruction bM
-    nEntry : _ = basicBlockInstructions bN
+    mTerm = bbTerminatorStmt bM
+    nEntry : _ = bbStmts bN
     -- These lookups should never fail (unless the caller provided
     -- the postdominator tree for a different function).  the
     -- postdominators function just returns empty sets, and the
@@ -173,16 +173,14 @@ addCDGEdge pdt pdoms bM bN acc
 
 -- | Convert a list of Instructions into the list of their
 -- BasicBlocks.  There are no repetitions in the result.
-postdomBlocks :: [Instruction] -> [BasicBlock]
+postdomBlocks :: [Stmt] -> [BasicBlock]
 postdomBlocks = S.toList . foldr addInstBlock mempty
   where
-    addInstBlock i acc =
-      let Just bb = instructionBasicBlock i
-      in S.insert bb acc
+    addInstBlock i acc = S.insert (stmtBasicBlock i) acc
 
 -- | Given two lists, find the first element they share in common (if
 -- any).
-commonAncestor :: [Instruction] -> [Instruction] -> Maybe Instruction
+commonAncestor :: [Stmt] -> [Stmt] -> Maybe Stmt
 commonAncestor l1 = F.find (`elem` l1)
 
 {- Note [CDG]
@@ -205,37 +203,39 @@ BasicBlocks.
 
 -- Visualization
 
-instance ToGraphviz CDG where
-  toGraphviz = cdgGraphvizRepr
-
-cdgGraphvizParams :: GraphvizParams n Instruction el BasicBlock Instruction
-cdgGraphvizParams =
-  defaultParams { fmtNode = \(_,l) -> [ toLabel (toValue l) ]
-                , clusterID = Num . Int . basicBlockUniqueId
-                , clusterBy = nodeCluster
-                , fmtCluster = formatCluster
-                }
-  where
-    nodeCluster l@(_, i) =
-      let Just bb = instructionBasicBlock i
-      in C bb (N l)
-    formatCluster bb = [GraphAttrs [toLabel (show (basicBlockName bb))]]
-
-cdgGraphvizRepr :: CDG -> DotGraph Int
-cdgGraphvizRepr cdg@(CDG _ bm) = graphElemsToDot cdgGraphvizParams ns es
-  where
-    f = getFunction cdg
-    ns = map (instructionUniqueId &&& id) (functionInstructions f)
-    es = concatMap blockEdges (functionBody f)
-
-    blockEdges bb =
-      case M.lookup bb bm of
-        Nothing -> []
-        Just deps ->
-          -- Each instruction in BB gets an edge to the terminator
-          -- of each dependency
-          let depTerms = map basicBlockTerminatorInstruction deps
-          in concatMap (addEdges depTerms) (basicBlockInstructions bb)
-    addEdges depTerms i = map (addEdge i) depTerms
-    addEdge i dterm =
-      (instructionUniqueId i, instructionUniqueId dterm, ())
+-- TODO
+--
+-- instance ToGraphviz CDG where
+--   toGraphviz = cdgGraphvizRepr
+-- 
+-- cdgGraphvizParams :: GraphvizParams n Stmt el BasicBlock Stmt
+-- cdgGraphvizParams =
+--   defaultParams { fmtNode = \(_,l) -> [ toLabel (toValue l) ]
+--                 , clusterID = Num . Int . basicBlockUniqueId
+--                 , clusterBy = nodeCluster
+--                 , fmtCluster = formatCluster
+--                 }
+--   where
+--     nodeCluster l@(_, i) =
+--       let Just bb = instructionBasicBlock i
+--       in C bb (N l)
+--     formatCluster bb = [GraphAttrs [toLabel (show (basicBlockName bb))]]
+-- 
+-- cdgGraphvizRepr :: CDG -> DotGraph Int
+-- cdgGraphvizRepr cdg@(CDG _ bm) = graphElemsToDot cdgGraphvizParams ns es
+--   where
+--     f = getFunction cdg
+--     ns = map (instructionUniqueId &&& id) (functionStmts f)
+--     es = concatMap blockEdges (functionBody f)
+-- 
+--     blockEdges bb =
+--       case M.lookup bb bm of
+--         Nothing -> []
+--         Just deps ->
+--           -- Each instruction in BB gets an edge to the terminator
+--           -- of each dependency
+--           let depTerms = map basicBlockTerminatorStmt deps
+--           in concatMap (addEdges depTerms) (basicBlockStmts bb)
+--     addEdges depTerms i = map (addEdge i) depTerms
+--     addEdge i dterm =
+--       (instructionUniqueId i, instructionUniqueId dterm, ())

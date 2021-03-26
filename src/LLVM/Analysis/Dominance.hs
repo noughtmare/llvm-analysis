@@ -50,7 +50,7 @@ import LLVM.Analysis.CFG
 -- import Debug.Trace
 -- debug = flip trace
 
-data DominatorTree = DT CFG (Map Instruction Instruction)
+data DominatorTree = DT CFG (Map Stmt Stmt)
 
 class HasDomTree a where
   getDomTree :: a -> DominatorTree
@@ -66,8 +66,8 @@ instance HasDomTree CFG where
 instance HasCFG DominatorTree where
   getCFG (DT cfg _) = cfg
 
-instance HasFunction DominatorTree where
-  getFunction = getFunction . getCFG
+instance HasDefine DominatorTree where
+  getDefine = getDefine . getCFG
 
 -- | Construct a DominatorTree from something that behaves like a
 -- control flow graph.
@@ -76,26 +76,26 @@ dominatorTree f = DT cfg idomMap
   where
     cfg = getCFG f
     (g, revmap) = cfgToGraph cfg
-    idoms = G.iDom g (instructionUniqueId entryInst)
+    idoms = G.iDom g (stmtUniqueId entryInst)
     idomMap = foldr (remapInst revmap) mempty idoms
     -- to make the rooted graph, we don't need any extra nodes here -
     -- just pull out the entry instruction
-    entryBlock : _ = functionBody (getFunction cfg)
-    entryInst : _ = basicBlockInstructions entryBlock
+    entryBlock : _ = defBody (getDefine cfg)
+    entryInst : _ = bbStmts entryBlock
 
-immediateDominatorFor :: (HasDomTree t) => t -> Instruction -> Maybe Instruction
+immediateDominatorFor :: (HasDomTree t) => t -> Stmt -> Maybe Stmt
 immediateDominatorFor dt i = M.lookup i t
   where
     DT _ t = getDomTree dt
 
-immediateDominators :: (HasDomTree t) => t -> [(Instruction, Instruction)]
+immediateDominators :: (HasDomTree t) => t -> [(Stmt, Stmt)]
 immediateDominators dt = M.toList t
   where
     DT _ t = getDomTree dt
 
 -- | Check whether n dominates m
-dominates :: (HasDomTree t) => t -> Instruction -> Instruction -> Bool
-dominates dt n m = checkDom m
+dominates :: (HasDomTree t) => t -> Stmt -> Stmt -> Bool
+dominates dt n = checkDom
   where
     (DT _ t) = getDomTree dt
     -- Walk backwards in the dominator tree looking for n
@@ -103,21 +103,21 @@ dominates dt n m = checkDom m
       | i == n = True
       | otherwise = maybe False checkDom (M.lookup i t)
 
-dominators :: (HasDomTree t) => t -> [(Instruction, [Instruction])]
+dominators :: (HasDomTree t) => t -> [(Stmt, [Stmt])]
 dominators pt =
   zip is (map (getDominators t) is)
   where
     dt@(DT _ t) = getDomTree pt
-    f = getFunction dt
-    is = functionInstructions f
+    f = getDefine dt
+    is = defStmts f
 
-dominatorsFor :: (HasDomTree t) => t -> Instruction -> [Instruction]
+dominatorsFor :: (HasDomTree t) => t -> Stmt -> [Stmt]
 dominatorsFor pt = getDominators t
   where
     DT _ t = getDomTree pt
 
 
-data PostdominatorTree = PDT CFG (Map Instruction Instruction)
+data PostdominatorTree = PDT CFG (Map Stmt Stmt)
 
 class HasPostdomTree a where
   getPostdomTree :: a -> PostdominatorTree
@@ -133,13 +133,13 @@ instance HasPostdomTree PostdominatorTree where
 instance HasCFG PostdominatorTree where
   getCFG (PDT cfg _) = cfg
 
-instance HasFunction PostdominatorTree where
-  getFunction = getFunction . getCFG
+instance HasDefine PostdominatorTree where
+  getDefine = getDefine . getCFG
 
 -- | Construct a PostdominatorTree from something that behaves like a
 -- control flow graph.
 postdominatorTree :: (HasCFG f) => f -> PostdominatorTree
-postdominatorTree f = (PDT cfg idomMap)
+postdominatorTree f = PDT cfg idomMap
   where
     cfg = getCFG f
     (g, revmap) = cfgToGraph cfg
@@ -155,34 +155,34 @@ remapInst revmap (n, d) acc = fromMaybe acc $ do
   dI <- IM.lookup d revmap
   return $ M.insert nI dI acc
 
-immediatePostdominatorFor :: (HasPostdomTree t) => t -> Instruction -> Maybe Instruction
+immediatePostdominatorFor :: (HasPostdomTree t) => t -> Stmt -> Maybe Stmt
 immediatePostdominatorFor pt i = M.lookup i t
   where
     PDT _ t = getPostdomTree pt
 
-immediatePostdominators :: (HasPostdomTree t) => t -> [(Instruction, Instruction)]
+immediatePostdominators :: (HasPostdomTree t) => t -> [(Stmt, Stmt)]
 immediatePostdominators pt = M.toList t
   where
     PDT _ t = getPostdomTree pt
 
--- | Tests whether or not an Instruction n postdominates Instruction m
-postdominates :: (HasPostdomTree t) => t -> Instruction -> Instruction -> Bool
-postdominates pdt n m = checkPDom m
+-- | Tests whether or not an Stmt n postdominates Stmt m
+postdominates :: (HasPostdomTree t) => t -> Stmt -> Stmt -> Bool
+postdominates pdt n = checkPDom
   where
     PDT _ t = getPostdomTree pdt
     checkPDom i
       | i == n = True
       | otherwise = maybe False checkPDom (M.lookup i t)
 
-postdominators :: (HasPostdomTree t) => t -> [(Instruction, [Instruction])]
+postdominators :: (HasPostdomTree t) => t -> [(Stmt, [Stmt])]
 postdominators pt =
   zip is (map (getDominators t) is)
   where
     pdt@(PDT _ t) = getPostdomTree pt
-    f = getFunction pdt
-    is = functionInstructions f
+    f = getDefine pdt
+    is = defStmts f
 
-postdominatorsFor :: (HasPostdomTree t) => t -> Instruction -> [Instruction]
+postdominatorsFor :: (HasPostdomTree t) => t -> Stmt -> [Stmt]
 postdominatorsFor pt = getDominators t
   where
     PDT _ t = getPostdomTree pt
@@ -191,9 +191,9 @@ postdominatorsFor pt = getDominators t
 -- instruction, in order (with the nearest dominators at the beginning
 -- of the list).  Note that the instruction iself is not included
 -- (every instruction trivially dominates itself).
-getDominators :: Map Instruction Instruction
-                     -> Instruction
-                     -> [Instruction]
+getDominators :: Map Stmt Stmt
+                     -> Stmt
+                     -> [Stmt]
 getDominators m = go
   where
     go i =
@@ -207,17 +207,17 @@ getDominators m = go
 -- linear process.  We'll then pass this new graph to dom-lt to
 -- compute immediate dominators for us efficiently.
 --
--- IDs will be Instruction UniqueIds, and the root will be the ID of
+-- IDs will be Stmt UniqueIds, and the root will be the ID of
 -- the entry instruction.
-cfgToGraph :: CFG -> (G.Gr () (), IntMap Instruction)
+cfgToGraph :: CFG -> (G.Gr () (), IntMap Stmt)
 cfgToGraph cfg = (G.mkGraph ns es, revMap)
   where
-    f = getFunction cfg
-    blocks = functionBody f
-    is = functionInstructions f
-    revMap = foldr (\i -> IM.insert (instructionUniqueId i) i) mempty is
+    f = getDefine cfg
+    blocks = defBody f
+    is = defStmts f
+    revMap = foldr (\i -> IM.insert (stmtUniqueId i) i) mempty is
     -- Make sure we add the virtual exit node
-    ns = (-1, ()) : map (\i -> (instructionUniqueId i, ())) is
+    ns = (-1, ()) : map (\i -> (stmtUniqueId i, ())) is
     es = concatMap (blockEdges cfg) blocks
 
 -- | Construct all of the edges internal to a basic block, as well as
@@ -229,46 +229,46 @@ blockEdges cfg b =
   addSuccessorEdges internalEdges
   where
     mkEdge s d = (s, d, ())
-    is = map instructionUniqueId $ basicBlockInstructions b
-    ti = instructionUniqueId $ basicBlockTerminatorInstruction b
+    is = map stmtUniqueId $ bbStmts b
+    ti = stmtUniqueId $ bbTerminatorStmt b
     succs = map blockEntryId $ basicBlockSuccessors cfg b
-    internalEdges = map (\(s, d) -> mkEdge s d) (zip is (tail is))
+    internalEdges = zipWith mkEdge is (tail is)
     -- If we have successors, do the sensible thing.  If we don't have
     -- successors, add an edge from ti -> -1 (a virtual catchall
     -- exit),
     addSuccessorEdges a
       | null succs = mkEdge ti (-1) : a
-      | otherwise = map (\sb -> mkEdge ti sb) succs ++ a
+      | otherwise = map (mkEdge ti) succs ++ a
 
 blockEntryId :: BasicBlock -> UniqueId
-blockEntryId bb = instructionUniqueId ei
+blockEntryId bb = stmtUniqueId ei
   where
-    ei : _ = basicBlockInstructions bb
+    ei : _ = bbStmts bb
 
 
 -- Visualization
-domTreeParams :: GraphvizParams n Instruction el () Instruction
-domTreeParams =
-  nonClusteredParams { fmtNode = \(_, l) -> [ toLabel (toValue l) ] }
-
-treeToGraphviz :: CFG -> Map Instruction Instruction -> DotGraph Int
-treeToGraphviz cfg t = graphElemsToDot domTreeParams ns es
-  where
-    f = getFunction cfg
-    is = functionInstructions f
-    ns = map (instructionUniqueId &&& id) is
-    es = foldr toDomEdge [] is
-
-    toDomEdge i acc =
-      case M.lookup i t of
-        Nothing -> acc
-        Just d ->
-          (instructionUniqueId i, instructionUniqueId d, ()) : acc
-
-instance ToGraphviz DominatorTree where
-  toGraphviz (DT cfg t) = treeToGraphviz cfg t
-
-instance ToGraphviz PostdominatorTree where
-  toGraphviz (PDT cfg t) = treeToGraphviz cfg t
-
-{-# ANN module "HLint: ignore Use if" #-}
+-- domTreeParams :: GraphvizParams n Stmt el () Stmt
+-- domTreeParams =
+--   nonClusteredParams { fmtNode = \(_, l) -> [ toLabel (toValue l) ] }
+-- 
+-- treeToGraphviz :: CFG -> Map Stmt Stmt -> DotGraph Int
+-- treeToGraphviz cfg t = graphElemsToDot domTreeParams ns es
+--   where
+--     f = getDefine cfg
+--     is = defStmts f
+--     ns = map (stmtUniqueId &&& id) is
+--     es = foldr toDomEdge [] is
+-- 
+--     toDomEdge i acc =
+--       case M.lookup i t of
+--         Nothing -> acc
+--         Just d ->
+--           (stmtUniqueId i, stmtUniqueId d, ()) : acc
+-- 
+-- instance ToGraphviz DominatorTree where
+--   toGraphviz (DT cfg t) = treeToGraphviz cfg t
+-- 
+-- instance ToGraphviz PostdominatorTree where
+--   toGraphviz (PDT cfg t) = treeToGraphviz cfg t
+-- 
+-- {-# ANN module "HLint: ignore Use if" #-}

@@ -17,7 +17,6 @@ module LLVM.Analysis.NullPointers (
 import Control.Failure
 import Data.Functor.Identity
 import Data.Maybe ( fromMaybe )
-import Data.Monoid
 import Data.HashSet ( HashSet )
 import qualified Data.HashSet as HS
 import Data.Typeable ( Typeable )
@@ -54,13 +53,13 @@ nullPointersAnalysis cfgLike =
     analysis = fwdDataflowEdgeAnalysis Top meet transfer edgeTransfer
 -- See Note [NULL Pointers]
 
-nullPointersAt :: NullPointersSummary -> Instruction -> [Value]
+nullPointersAt :: NullPointersSummary -> Stmt -> [Value]
 nullPointersAt (NPS summ) i =
   case runIdentity $ dataflowResultAt summ i of
     Top -> []
     NS mustNull _ -> HS.toList mustNull
 
-notNullPointersAt :: NullPointersSummary -> Instruction -> [Value]
+notNullPointersAt :: NullPointersSummary -> Stmt -> [Value]
 notNullPointersAt (NPS summ) i =
   case runIdentity $ dataflowResultAt summ i of
     Top -> []
@@ -77,7 +76,7 @@ meet (NS must1 not1) (NS must2 not2) =
 
 -- | The transfer function is the identity because all work is done on
 -- the edges.
-transfer :: (Monad m) => NULLState -> Instruction -> m NULLState
+transfer :: (Monad m) => NULLState -> Stmt -> m NULLState
 transfer s _ = return s
 
 -- | If this terminator is a conditional branch comparing a pointer
@@ -87,7 +86,7 @@ transfer s _ = return s
 -- We don't need to be too careful about checking for a==b (where b or
 -- a is a pointer known to be NULL) because we can rely on constant
 -- propagation from LLVM.
-edgeTransfer :: (Monad m ) => NULLState -> Instruction -> m [(BasicBlock, NULLState)]
+edgeTransfer :: (Monad m ) => NULLState -> Stmt -> m [(BasicBlock, NULLState)]
 edgeTransfer s i = return $ fromMaybe [] $ do
   (nullBlock, nullVal, notNullBlock) <- branchNullInfo i
   return [(nullBlock, addNull nullVal s),
@@ -95,11 +94,11 @@ edgeTransfer s i = return $ fromMaybe [] $ do
          ]
 
 isNullPtr :: Value -> Bool
-isNullPtr (valueContent -> ConstantC ConstantPointerNull {}) = True
+isNullPtr (Value _ _ ValNull) = True
 isNullPtr _ = False
 
-data NullInfoError = NotABranchInst Instruction
-                   | NotANullTest Instruction
+data NullInfoError = NotABr Stmt
+                   | NotANullTest Stmt
                    deriving (Typeable, Show)
 
 -- | Given a BranchInst, return:
@@ -110,23 +109,17 @@ data NullInfoError = NotABranchInst Instruction
 --
 -- 3) The BasicBlock where the pointer is known to be not NULL
 branchNullInfo :: (Failure NullInfoError m)
-                  => Instruction
+                  => Stmt
                   -> m (BasicBlock, Value, BasicBlock)
-branchNullInfo i@BranchInst { branchTrueTarget = tt
-                            , branchFalseTarget = ft
-                            , branchCondition = (valueContent -> InstructionC ci@ICmpInst { cmpPredicate = ICmpEq })
-                            }
-  | isNullPtr (cmpV1 ci) = return (tt, cmpV2 ci, ft)
-  | isNullPtr (cmpV2 ci) = return (tt, cmpV1 ci, ft)
+branchNullInfo i@Stmt {stmtInstr = Br (ValInstr (ICmp Ieq cmpV1 cmpV2)) tt ft}
+  | isNullPtr cmpV1 = return (tt, cmpV2, ft)
+  | isNullPtr cmpV2 = return (tt, cmpV1, ft)
   | otherwise = failure (NotANullTest i)
-branchNullInfo i@BranchInst { branchTrueTarget = tt
-                            , branchFalseTarget = ft
-                            , branchCondition = (valueContent -> InstructionC ci@ICmpInst { cmpPredicate = ICmpNe })
-                            }
-  | isNullPtr (cmpV1 ci) = return (ft, cmpV2 ci, tt)
-  | isNullPtr (cmpV2 ci) = return (ft, cmpV1 ci, tt)
+branchNullInfo i@Stmt {stmtInstr=Br (ValInstr (ICmp Ine cmpV1 cmpV2)) tt ft}
+  | isNullPtr cmpV1 = return (ft, cmpV2, tt)
+  | isNullPtr cmpV2 = return (ft, cmpV1, tt)
   | otherwise = failure (NotANullTest i)
-branchNullInfo i = failure (NotABranchInst i)
+branchNullInfo i = failure (NotABr i)
 
 
 

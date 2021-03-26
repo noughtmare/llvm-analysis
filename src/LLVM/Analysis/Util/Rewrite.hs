@@ -782,16 +782,16 @@ adToArgument ad f = do
                   , argumentFunction = f
                   }
 
-class HasFunction a where
-  functionReference :: a -> Function
+class HasDefine a where
+  defineReference :: a -> Function
 
-instance HasFunction Argument where
+instance HasDefine Argument where
   functionReference = argumentFunction
 
-instance HasFunction Function where
+instance HasDefine Function where
   functionReference = id
 
-instance HasFunction BasicBlock where
+instance HasDefine BasicBlock where
   functionReference = basicBlockFunction
 
 getCurrentFunction :: (HasFunction a) => a -> ModuleRewriter Function

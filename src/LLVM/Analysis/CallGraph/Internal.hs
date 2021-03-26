@@ -60,7 +60,6 @@ import qualified Data.HashMap.Strict as HM
 import Data.Map ( Map )
 import qualified Data.Map as M
 import qualified Data.Set as S
-import Data.Monoid
 
 import LLVM.Analysis
 import LLVM.Analysis.PointsTo
@@ -69,9 +68,9 @@ import LLVM.Analysis.PointsTo
 type CG = Gr CallNode CallEdge
 
 -- | The nodes are actually a wrapper type:
-data CallNode = DefinedFunction Function
+data CallNode = Def Define
                 -- ^ An actual function defined in this 'Module'
-              | ExtFunction ExternalFunction
+              | Dec Declare
                 -- ^ An externally-defined function with a declaration
                 -- in the 'Module'
               | UnknownFunction
@@ -80,8 +79,8 @@ data CallNode = DefinedFunction Function
               deriving (Eq)
 
 instance Show CallNode where
-  show (DefinedFunction v) = show $ functionName v
-  show (ExtFunction v) = "extern " ++ show (externalFunctionName v)
+  show (Def v) = show $ (\(Symbol s) -> s) $ defName v
+  show (Dec v) = "extern " ++ show ((\(Symbol s) -> s) (decName v))
   show UnknownFunction = "unknown"
 
 instance Labellable CallNode where
@@ -119,12 +118,12 @@ instance ToGraphviz CallGraph where
 
 -- | Get all of the functions defined in this module from the
 -- CallGraph
-callGraphFunctions :: CallGraph -> [Function]
+callGraphFunctions :: CallGraph -> [Define]
 callGraphFunctions (CallGraph cg _) =
-  mapMaybe extractDefinedFunction (FGL.labNodes cg)
+  mapMaybe extractDef (FGL.labNodes cg)
   where
-    extractDefinedFunction (_, DefinedFunction f) = Just f
-    extractDefinedFunction _ = Nothing
+    extractDef (_, Def f) = Just f
+    extractDef _ = Nothing
 
 -- | Convert the CallGraph to a graph ADT that can be traversed,
 -- manipulated, or easily displayed with graphviz.
@@ -135,51 +134,51 @@ callGraphRepr (CallGraph g _) = g
 
 -- | Given a Call or Invoke instruction, return the list of possible
 -- callees.  All returned Values will be either Functions or
--- ExternalFunctions.
+-- Declares.
 --
 -- Passing a non-call/invoke instruction will trigger a noisy pattern
 -- matching failure.
-callSiteTargets :: CallGraph -> Instruction -> [Value]
-callSiteTargets cg (CallInst { callFunction = f }) =
+callSiteTargets :: CallGraph -> Instr -> [Value]
+callSiteTargets cg (Call _ _ f _) =
   callValueTargets cg f
-callSiteTargets cg (InvokeInst { invokeFunction = f}) =
+callSiteTargets cg (Invoke _ f _ _ _) =
   callValueTargets cg f
 callSiteTargets _ i =
   error ("LLVM.Analysis.CallGraph.callSiteTargets: Expected a Call or Invoke instruction: " ++ show i)
 
 -- | Given the value called by a Call or Invoke instruction, return
--- all of the possible Functions or ExternalFunctions that it could
+-- all of the possible Functions or Declares that it could
 -- be.
 callValueTargets :: CallGraph -> Value -> [Value]
 callValueTargets (CallGraph _ pta) v =
   let v' = stripBitcasts v
-  in case valueContent v' of
-    FunctionC _ -> [v']
-    ExternalFunctionC _ -> [v']
+  in case valValue v' of
+    ValSymbol (SymValDefine _) -> [v']
+    ValSymbol (SymValDeclare _) -> [v']
     _ -> pointsTo pta v
 
-functionCallees :: CallGraph -> Function -> [Value]
+functionCallees :: CallGraph -> Define -> [Value]
 functionCallees (CallGraph g _) =
-  mapMaybe (toCallValue g) . FGL.suc g . functionUniqueId
+  mapMaybe (toCallValue g) . FGL.suc g . defUniqueId
 
-allFunctionCallees :: CallGraph -> Function -> [Value]
+allFunctionCallees :: CallGraph -> Define -> [Value]
 allFunctionCallees (CallGraph g _) =
-  mapMaybe (toCallValue g) . flip FGL.dfs g . (:[]) . functionUniqueId
+  mapMaybe (toCallValue g) . flip FGL.dfs g . (:[]) . defUniqueId
 
-functionCallers :: CallGraph -> Function -> [Value]
+functionCallers :: CallGraph -> Define -> [Value]
 functionCallers (CallGraph g _) =
-  mapMaybe (toCallValue g) . FGL.pre g . functionUniqueId
+  mapMaybe (toCallValue g) . FGL.pre g . defUniqueId
 
-allFunctionCallers :: CallGraph -> Function -> [Value]
+allFunctionCallers :: CallGraph -> Define -> [Value]
 allFunctionCallers (CallGraph g _) =
-  mapMaybe (toCallValue g) . flip FGL.rdfs g . (:[]) . functionUniqueId
+  mapMaybe (toCallValue g) . flip FGL.rdfs g . (:[]) . defUniqueId
 
 toCallValue :: CG -> Vertex -> Maybe Value
 toCallValue g v = do
   l <- FGL.lab g v
   case l of
-    DefinedFunction f -> return (toValue f)
-    ExtFunction ef -> return (toValue ef)
+    Def f -> return (Value (getType f) (defUniqueId f) (ValSymbol (SymValDefine f)))
+    Dec ef -> return (Value (getType ef) (decUniqueId ef) (ValSymbol (SymValDeclare ef)))
     _ -> Nothing
 
 -- | Build a call graph for the given 'Module' using a pre-computed
@@ -193,7 +192,7 @@ toCallValue g v = do
 callGraph :: (PointsToAnalysis a)
              => Module
              -> a            -- ^ A points-to analysis (to resolve function pointers)
-             -> [Function]   -- ^ The entry points to the 'Module'
+             -> [Define]   -- ^ The entry points to the 'Module'
              -> CallGraph
 callGraph m pta _ {-entryPoints-} =
   CallGraph (FGL.mkGraph allNodes (unique allEdges)) pta
@@ -202,14 +201,14 @@ callGraph m pta _ {-entryPoints-} =
     (allEdges, unknownNodes) = buildEdges pta funcs
     -- ^ Build up all of the edges and accumulate unknown nodes as
     -- they are created on-the-fly
-    knownNodes = map (\f -> (valueUniqueId f, DefinedFunction f)) funcs
+    knownNodes = map (\f -> (defUniqueId f, Def f)) funcs
     -- ^ Add nodes for unknown functions (one unknown node for each
     -- type signature in an indirect call).  The unknown nodes can use
     -- negative numbers for nodeids since actual Value IDs start at 0.
 
-    externNodes = map mkExternFunc $ moduleExternalFunctions m
+    externNodes = map mkExternFunc $ modDeclares m
 
-    funcs = moduleDefinedFunctions m
+    funcs = modDefines m
 
 unique :: (Hashable a, Eq a) => [a] -> [a]
 unique = HS.toList . HS.fromList
@@ -221,50 +220,50 @@ type Edge = FGL.LEdge CallEdge
 unknownNodeId :: Vertex
 unknownNodeId = -100
 
-mkExternFunc :: ExternalFunction -> (Vertex, CallNode)
-mkExternFunc v = (valueUniqueId v, ExtFunction v)
+mkExternFunc :: Declare -> (Vertex, CallNode)
+mkExternFunc v = (decUniqueId v, Dec v)
 
-buildEdges :: (PointsToAnalysis a) => a -> [Function] -> ([Edge], [(Vertex, CallNode)])
+buildEdges :: (PointsToAnalysis a) => a -> [Define] -> ([Edge], [(Vertex, CallNode)])
 buildEdges pta funcs = do
   let es = map (buildFuncEdges pta) funcs
       unknownNodes = [(unknownNodeId, UnknownFunction)]
   (concat es, unknownNodes)
 
-isCall :: Instruction -> Bool
-isCall CallInst {} = True
-isCall InvokeInst {} = True
+isCall :: Instr -> Bool
+isCall Call {} = True
+isCall Invoke {} = True
 isCall _ = False
 
-buildFuncEdges :: (PointsToAnalysis a) => a -> Function -> [Edge]
+buildFuncEdges :: (PointsToAnalysis a) => a -> Define -> [Edge]
 buildFuncEdges pta f = concat es
   where
-    insts = concatMap basicBlockInstructions $ functionBody f
-    calls = filter isCall insts
+    insts = bbStmts =<< defBody f
+    calls = filter (isCall . stmtInstr) insts
     es = map (buildCallEdges pta f) calls
 
-getCallee :: Instruction -> Value
-getCallee CallInst { callFunction = f } = f
-getCallee InvokeInst { invokeFunction = f } = f
+getCallee :: Instr -> Value
+getCallee (Call _ _ f _) = f
+getCallee (Invoke _ f _ _ _) = f
 getCallee i = error ("LLVM.Analysis.CallGraph.getCallee: Expected a function in getCallee: " ++ show i)
 
-buildCallEdges :: (PointsToAnalysis a) => a -> Function -> Instruction -> [Edge]
-buildCallEdges pta caller callInst = build' (getCallee callInst)
+buildCallEdges :: (PointsToAnalysis a) => a -> Define -> Stmt -> [Edge]
+buildCallEdges pta caller Stmt {stmtInstr = callInst} = build' (getCallee callInst)
   where
-    callerId = valueUniqueId caller
+    callerId = defUniqueId caller
     build' calledFunc =
-      case valueContent' calledFunc of
-        FunctionC f ->
-          [(callerId, valueUniqueId f, DirectCall)]
-        GlobalAliasC GlobalAlias { globalAliasTarget = aliasee } ->
-          [(callerId, valueUniqueId aliasee, DirectCall)]
-        ExternalFunctionC ef ->
-          [(callerId, valueUniqueId ef, DirectCall)]
+      case valValue calledFunc of
+        ValSymbol (SymValDefine f) ->
+          [(callerId, defUniqueId f, DirectCall)]
+        ValSymbol (SymValAlias GlobalAlias { aliasValue = aliasee }) ->
+          [(callerId, valUniqueId aliasee, DirectCall)]
+        ValSymbol (SymValDeclare ef) ->
+          [(callerId, decUniqueId ef, DirectCall)]
         -- Functions can be bitcasted before being called - trace
         -- through those to find the underlying function
-        InstructionC BitcastInst { castedValue = bcv } -> build' bcv
+        ValIdent (IdentValStmt Stmt {stmtInstr = Conv BitCast bcv _}) -> build' bcv
         _ ->
           let targets = resolveIndirectCall pta callInst
-              indirectEdges = map (\t -> (callerId, valueUniqueId t, IndirectCall)) targets
+              indirectEdges = map (\t -> (callerId, valUniqueId t, IndirectCall)) targets
               unknownEdge = (callerId, unknownNodeId, UnknownCall)
           in unknownEdge : indirectEdges
 
@@ -303,8 +302,8 @@ assignComponent (compId, nodeIds) acc =
 
 -- CallGraphSCC Traversal
 
-type FunctionGraph = Gr Function ()
-type SCCGraph = Gr [(Vertex, Function)] ()
+type FunctionGraph = Gr Define ()
+type SCCGraph = Gr [(Vertex, Define)] ()
 
 -- | An abstract representation of a composable analysis.  Construct
 -- these with the smart constructors 'composableAnalysis',
@@ -363,12 +362,12 @@ callGraphSCCTraversal callgraph f seed =
     cg = definedCallGraph callgraph
     sccList = FGL.topsort' cg
     applyAnalysis component =
-      f (map (fromFunction . snd) component)
+      f (map (fromDefine . snd) component)
 
 -- | The projection of the call graph containing only defined
 -- functions (no externals)
 definedCallGraph :: CallGraph -> SCCGraph
-definedCallGraph = condense . projectDefinedFunctions . callGraphRepr
+definedCallGraph = condense . projectDefs . callGraphRepr
 
 -- FIXME: Have this function take a list of funcLikes; it will
 -- construct a @Map Function funcLike@ and pass that down to the
@@ -409,8 +408,8 @@ parallelCallGraphSCCTraversal callgraph f seed = runPar $ do
   where
     cg = definedCallGraph callgraph
 
-attachVars :: SCCGraph -> Map Int (IVar summary) -> (Vertex, [(Vertex, Function)])
-              -> ([Function], [IVar summary], IVar summary, Bool)
+attachVars :: SCCGraph -> Map Int (IVar summary) -> (Vertex, [(Vertex, Define)])
+              -> ([Define], [IVar summary], IVar summary, Bool)
 attachVars cg varMap (nid, component) =
   (map snd component, inVars, outVar, isRoot)
   where
@@ -428,7 +427,7 @@ forkSCC :: (NFData summary, Monoid summary, FuncLike funcLike)
            => ([funcLike] -> summary -> summary) -- ^ The summary function to apply
            -> summary -- ^ The seed value
            -> [IVar summary]
-           -> ([Function], [IVar summary], IVar summary, Bool)
+           -> ([Define], [IVar summary], IVar summary, Bool)
            -> Par [IVar summary]
 forkSCC f val0 acc (component, inVars, outVar, isRoot) = do
   fork $ do
@@ -440,7 +439,7 @@ forkSCC f val0 acc (component, inVars, outVar, isRoot) = do
           True -> val0
           False -> force $ mconcat depVals
           -- FIXME parmap
-        funcLikes = map fromFunction component
+        funcLikes = map fromDefine component
         sccSummary = f funcLikes seed
     put outVar sccSummary
   case isRoot of
@@ -598,20 +597,20 @@ composableDependencyAnalysis = ComposableAnalysisD
 
 -- Helpers
 
-projectDefinedFunctions :: CG -> FunctionGraph
-projectDefinedFunctions g = FGL.mkGraph ns' es'
+projectDefs :: CG -> FunctionGraph
+projectDefs g = FGL.mkGraph ns' es'
   where
     es = FGL.labEdges g
     ns = FGL.labNodes g
-    ns' = foldr keepDefinedFunctions [] ns
+    ns' = foldr keepDefs [] ns
     es' = map (\(s, d, _) -> (s, d, ())) $ filter (edgeIsBetweenDefined m) es
     m = M.fromList ns
 
-keepDefinedFunctions :: (Vertex, CallNode)
-                        -> [(Vertex, Function)]
-                        -> [(Vertex, Function)]
-keepDefinedFunctions (nid, DefinedFunction f) acc = (nid, f) : acc
-keepDefinedFunctions _ acc = acc
+keepDefs :: (Vertex, CallNode)
+                        -> [(Vertex, Define)]
+                        -> [(Vertex, Define)]
+keepDefs (nid, Def f) acc = (nid, f) : acc
+keepDefs _ acc = acc
 
 edgeIsBetweenDefined :: Map Int CallNode -> Edge -> Bool
 edgeIsBetweenDefined m (src, dst, _) =
@@ -620,7 +619,7 @@ edgeIsBetweenDefined m (src, dst, _) =
 nodeIsDefined :: Map Int CallNode -> Int -> Bool
 nodeIsDefined m n =
   case M.lookup n m of
-    Just (DefinedFunction _) -> True
+    Just (Def _) -> True
     _ -> False
 
 getDep :: Map Int c -> Int -> c

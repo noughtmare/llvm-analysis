@@ -28,12 +28,12 @@ class PointsToAnalysis a where
   -- points to itself), but nothing is guaranteed.
   --
   -- Should also give reasonable answers for globals and arguments
-  resolveIndirectCall :: a -> Instruction -> [Value]
+  resolveIndirectCall :: a -> Instr -> [Value]
   -- ^ Given a Call instruction, determine its possible callees.  The
   -- default implementation just delegates the called function value
   -- to 'pointsTo' and .
   resolveIndirectCall pta i =
     case i of
-      CallInst { callFunction = f } -> pointsTo pta f
-      InvokeInst { invokeFunction = f } -> pointsTo pta f
+      Call _ _ f _ -> pointsTo pta f
+      Invoke _ f _ _ _ -> pointsTo pta f
       _ -> []

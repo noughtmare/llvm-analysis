@@ -22,6 +22,7 @@ module LLVM.Analysis.CFG.Internal (
   Insn(..),
   ) where
 
+import Prelude hiding ((<*>))
 import Compiler.Hoopl
 import Control.DeepSeq
 import Control.Monad ( (>=>), (<=<) )
@@ -33,13 +34,14 @@ import qualified Data.List as L
 import Data.Map ( Map )
 import qualified Data.Map as M
 import Data.Maybe ( fromMaybe, mapMaybe )
-import Data.Monoid
+-- import Data.Monoid
 import Data.Set ( Set )
 import qualified Data.Set as S
 import Data.Tuple ( swap )
 import qualified Text.PrettyPrint.GenericPretty as PP
 
 import LLVM.Analysis
+import Data.Bifunctor (Bifunctor(bimap))
 
 -- CFG stuff
 
@@ -50,17 +52,17 @@ class HasCFG a where
 instance HasCFG CFG where
   getCFG = id
 
-instance HasCFG Function where
+instance HasCFG Define where
   getCFG = controlFlowGraph
 
-instance HasFunction CFG where
-  getFunction = cfgFunction
+instance HasDefine CFG where
+  getDefine = cfgDefine
 
 instance FuncLike CFG where
-  fromFunction = controlFlowGraph
+  fromDefine = controlFlowGraph
 
 -- | The type of function control flow graphs.
-data CFG = CFG { cfgFunction :: Function
+data CFG = CFG { cfgDefine :: Define
                , cfgLabelMap :: Map BasicBlock Label
                , cfgBlockMap :: Map Label BasicBlock
                , cfgBody :: Graph Insn C C
@@ -87,7 +89,7 @@ We build the cache with a single pass over the successors of the CFG.
 -- fine.  It is also fast because function comparison just compares
 -- unique integer IDs.
 instance Eq CFG where
-  (==) = on (==) cfgFunction
+  (==) = on (==) cfgDefine
 
 -- | This is a wrapper GADT around the LLVM IR to mesh with Hoopl.  It
 -- won't be exported or exposed to the user at all.  We need this for
@@ -102,10 +104,10 @@ instance Eq CFG where
 -- hoopl blocks need an entry and an exit).
 data Insn e x where
   Lbl :: BasicBlock -> Label -> Insn C O
-  Terminator :: Instruction -> [Label] -> Insn O C
+  Terminator :: Stmt -> [Label] -> Insn O C
   UniqueExitLabel :: Label -> Insn C O
   UniqueExit :: Insn O C
-  Normal :: Instruction -> Insn O O
+  Normal :: Stmt -> Insn O O
 
 instance NonLocal Insn where
   entryLabel (Lbl _ lbl) = lbl
@@ -114,38 +116,37 @@ instance NonLocal Insn where
   successors UniqueExit = []
 
 instance Show (Insn e x) where
-  show (Lbl bb _) = identifierAsString (basicBlockName bb) ++ ":"
+  show (Lbl _bb _) = {- TODO: identifierAsString (basicBlockName bb) ++ -} "?:"
   show (Terminator t _) = "  " ++ show t
   show (Normal i) = "  " ++ show i
   show (UniqueExitLabel _) = "UniqueExit:"
   show UniqueExit = "  done"
 
 -- | Create a CFG for a function
-controlFlowGraph :: Function -> CFG
+controlFlowGraph :: Define -> CFG
 controlFlowGraph f = runSimpleUniqueMonad (evalStateT builder mempty)
   where
     builder = do
       -- This is a unique label not associated with any block.  All of
       -- the instructions that exit a function get an edge to this
       -- virtual label.
-      exitLabel <- lift $ freshLabel
-      gs <- mapM (fromBlock exitLabel) (functionBody f)
+      exitLabel <- lift freshLabel
+      gs <- mapM (fromBlock exitLabel) (defBody f)
       let g = L.foldl' (|*><*|) emptyClosedGraph gs
           x = mkFirst (UniqueExitLabel exitLabel) <*> mkLast UniqueExit
           g' = g |*><*| x
       m <- get
-      let i0 = functionEntryInstruction f
-          Just bb0 = instructionBasicBlock i0
+      let bb0:_ = defBody f
           Just fEntryLabel = M.lookup bb0 m
-          cfg = CFG { cfgFunction = f
-                   , cfgBody = g'
-                   , cfgLabelMap = m
-                   , cfgBlockMap = M.fromList $ map swap $ M.toList m
-                   , cfgEntryLabel = fEntryLabel
-                   , cfgExitLabel = exitLabel
-                   , cfgPredecessors = mempty
-                   }
-          preds = foldr (recordPreds cfg) mempty (functionBody f)
+          cfg = CFG { cfgDefine = f
+                    , cfgBody = g'
+                    , cfgLabelMap = m
+                    , cfgBlockMap = M.fromList $ map swap $ M.toList m
+                    , cfgEntryLabel = fEntryLabel
+                    , cfgExitLabel = exitLabel
+                    , cfgPredecessors = mempty
+                    }
+          preds = foldr (recordPreds cfg) mempty (defBody f)
       return $ cfg { cfgPredecessors = fmap S.toList preds }
     addPred pblock b =
       M.insertWith S.union b (S.singleton pblock)
@@ -165,7 +166,7 @@ blockLabel bb = do
   case M.lookup bb m of
     Just l -> return l
     Nothing -> do
-      l <- lift $ freshLabel
+      l <- lift freshLabel
       put $ M.insert bb l m
       return l
 
@@ -174,10 +175,9 @@ blockLabel bb = do
 -- is the unique exit label that certain instructions generated edges
 -- to.
 fromBlock :: Label -> BasicBlock -> Builder (Graph Insn C C)
-fromBlock xlabel bb = do
+fromBlock xlabel bb@BasicBlock { bbStmts = body } = do
   lbl <- blockLabel bb
-  let body = basicBlockInstructions bb
-      (body', [term]) = L.splitAt (length body - 1) body
+  let (body', [term]) = L.splitAt (length body - 1) body
       normalNodes = map Normal body'
   tlbls <- terminatorLabels xlabel term
   let termNode = Terminator term tlbls
@@ -189,26 +189,26 @@ fromBlock xlabel bb = do
 -- with non-standard exits) to be collected.  If only normal exit
 -- results are desired, just check the dataflow result for RetInst
 -- results.
-terminatorLabels :: Label -> Instruction -> Builder [Label]
-terminatorLabels xlabel i =
+terminatorLabels :: Label -> Stmt -> Builder [Label]
+terminatorLabels xlabel Stmt { stmtInstr = i } =
   case i of
-    RetInst {} -> return [xlabel]
-    UnconditionalBranchInst { unconditionalBranchTarget = t } -> do
+    Ret {} -> return [xlabel]
+    Jump t -> do
       bl <- blockLabel t
       return [bl]
-    BranchInst { branchTrueTarget = tt, branchFalseTarget = ft } -> do
+    Br _ tt ft -> do
       tl <- blockLabel tt
       fl <- blockLabel ft
       return [tl, fl]
-    SwitchInst { switchDefaultTarget = dt, switchCases = (map snd -> ts) } -> do
+    Switch _ dt (map snd -> ts) -> do
       dl <- blockLabel dt
       tls <- mapM blockLabel ts
       return $ dl : tls
-    IndirectBranchInst { indirectBranchTargets = ts } ->
+    IndirectBr _ ts ->
       mapM blockLabel ts
-    ResumeInst {} -> return [xlabel]
-    UnreachableInst {} -> return [xlabel]
-    InvokeInst { invokeNormalLabel = nt, invokeUnwindLabel = ut } -> do
+    Resume {} -> return [xlabel]
+    Unreachable {} -> return [xlabel]
+    Invoke _ _ _ nt ut -> do
       nl <- blockLabel nt
       ul <- blockLabel ut
       return [nl, ul]
@@ -238,54 +238,54 @@ labelToBasicBlock cfg l = M.lookup l (cfgBlockMap cfg)
 
 -- Visualization
 
-cfgGraphvizParams :: GV.GraphvizParams n Instruction CFGEdge BasicBlock Instruction
-cfgGraphvizParams =
-  GV.defaultParams { GV.fmtNode = \(_,l) -> [GV.toLabel (toValue l)]
-                   , GV.fmtEdge = formatEdge
-                   , GV.clusterID = GV.Num . GV.Int . basicBlockUniqueId
-                   , GV.fmtCluster = formatCluster
-                   , GV.clusterBy = nodeCluster
-                   }
-  where
-    nodeCluster l@(_, i) =
-      let Just bb = instructionBasicBlock i
-      in GV.C bb (GV.N l)
-    formatCluster bb = [GV.GraphAttrs [GV.toLabel (show (basicBlockName bb))]]
-    formatEdge (_, _, l) =
-      let lbl = GV.toLabel l
-      in case l of
-        TrueEdge -> [lbl, GV.color GV.ForestGreen]
-        FalseEdge -> [lbl, GV.color GV.Crimson]
-        EqualityEdge _ -> [lbl, GV.color GV.DeepSkyBlue]
-        IndirectEdge -> [lbl, GV.color GV.Indigo, GV.style GV.dashed]
-        UnwindEdge -> [lbl, GV.color GV.Tomato4, GV.style GV.dotted]
-        OtherEdge -> [lbl]
+-- cfgGraphvizParams :: GV.GraphvizParams n Stmt CFGEdge BasicBlock Stmt
+-- cfgGraphvizParams =
+--   GV.defaultParams { GV.fmtNode = \(_,l) -> [GV.toLabel (toValue l)]
+--                    , GV.fmtEdge = formatEdge
+--                    , GV.clusterID = GV.Num . GV.Int . bbUniqueId
+--                    , GV.fmtCluster = formatCluster
+--                    , GV.clusterBy = nodeCluster
+--                    }
+--   where
+--     nodeCluster l@(_, i) =
+--       let Just bb = _stmtBasicBlock i
+--       in GV.C bb (GV.N l)
+--     formatCluster bb = [GV.GraphAttrs [GV.toLabel (show (_basicBlockName bb))]]
+--     formatEdge (_, _, l) =
+--       let lbl = GV.toLabel l
+--       in case l of
+--         TrueEdge -> [lbl, GV.color GV.ForestGreen]
+--         FalseEdge -> [lbl, GV.color GV.Crimson]
+--         EqualityEdge _ -> [lbl, GV.color GV.DeepSkyBlue]
+--         IndirectEdge -> [lbl, GV.color GV.Indigo, GV.style GV.dashed]
+--         UnwindEdge -> [lbl, GV.color GV.Tomato4, GV.style GV.dotted]
+--         OtherEdge -> [lbl]
 
 data CFGEdge = TrueEdge
              | FalseEdge
-             | EqualityEdge Value
+             | EqualityEdge Integer
              | IndirectEdge
              | UnwindEdge
              | OtherEdge
              deriving (Eq, Show)
 
-instance GV.Labellable CFGEdge where
-  toLabelValue TrueEdge = GV.toLabelValue "True"
-  toLabelValue FalseEdge = GV.toLabelValue "False"
-  toLabelValue (EqualityEdge v) = GV.toLabelValue ("== " ++ show v)
-  toLabelValue IndirectEdge = GV.toLabelValue "Indirect"
-  toLabelValue UnwindEdge = GV.toLabelValue "Unwind"
-  toLabelValue OtherEdge = GV.toLabelValue ""
+-- instance GV.Labellable CFGEdge where
+--   toLabelValue TrueEdge = GV.toLabelValue "True"
+--   toLabelValue FalseEdge = GV.toLabelValue "False"
+--   toLabelValue (EqualityEdge v) = GV.toLabelValue ("== " ++ show v)
+--   toLabelValue IndirectEdge = GV.toLabelValue "Indirect"
+--   toLabelValue UnwindEdge = GV.toLabelValue "Unwind"
+--   toLabelValue OtherEdge = GV.toLabelValue ""
 
-instance ToGraphviz CFG where
-  toGraphviz = cfgGraphvizRepr
+-- instance ToGraphviz CFG where
+--   toGraphviz = cfgGraphvizRepr
 
-cfgGraphvizRepr :: CFG -> GV.DotGraph Int
-cfgGraphvizRepr cfg = GV.graphElemsToDot cfgGraphvizParams ns es
-  where
-    f = getFunction cfg
-    ns = map toGNode (functionInstructions f)
-    es = concatMap toEdges (functionBody f)
+-- cfgGraphvizRepr :: CFG -> GV.DotGraph Int
+-- cfgGraphvizRepr cfg = GV.graphElemsToDot cfgGraphvizParams ns es
+--   where
+--     f = cfgDefine cfg
+--     ns = map toGNode (defineInstructions f)
+--     es = concatMap toEdges (defBody f)
 
 -- | There is an edge from the terminator of the BB to the entry of
 -- each of its successors.  The edges should be labelled according to
@@ -293,50 +293,50 @@ cfgGraphvizRepr cfg = GV.graphElemsToDot cfgGraphvizParams ns es
 -- each instruction in the BB.
 toEdges :: BasicBlock -> [(Int, Int, CFGEdge)]
 toEdges bb =
-  case ti of
-    RetInst {} -> intraEdges
-    UnreachableInst {} -> intraEdges
-    UnconditionalBranchInst { unconditionalBranchTarget = t } ->
-      let (ei:_) = basicBlockInstructions t
-      in (instructionUniqueId ti, instructionUniqueId ei, OtherEdge) : intraEdges
-    BranchInst { branchTrueTarget = tt, branchFalseTarget = ft } ->
-      let (tei:_) = basicBlockInstructions tt
-          (fei:_) = basicBlockInstructions ft
-      in (instructionUniqueId ti, instructionUniqueId tei, TrueEdge) :
-         (instructionUniqueId ti, instructionUniqueId fei, FalseEdge) :
+  case stmtInstr ti of
+    Ret {} -> intraEdges
+    Unreachable {} -> intraEdges
+    Jump t ->
+      let (ei:_) = bbStmts t
+      in (stmtUniqueId ti, stmtUniqueId ei, OtherEdge) : intraEdges
+    Br _ tt ft ->
+      let (tei:_) = bbStmts tt
+          (fei:_) = bbStmts ft
+      in (stmtUniqueId ti, stmtUniqueId tei, TrueEdge) :
+         (stmtUniqueId ti, stmtUniqueId fei, FalseEdge) :
          intraEdges
-    SwitchInst { switchDefaultTarget = dt, switchCases = cases } ->
-      let (dei:_) = basicBlockInstructions dt
+    Switch _ dt cases ->
+      let (dei:_) = bbStmts dt
           caseNodes = map toCaseNode cases
-      in (instructionUniqueId ti, instructionUniqueId dei, OtherEdge):caseNodes ++ intraEdges
-    IndirectBranchInst { indirectBranchTargets = bs } ->
+      in (stmtUniqueId ti, stmtUniqueId dei, OtherEdge):caseNodes ++ intraEdges
+    IndirectBr _ bs ->
       map toIndirectEdge bs ++ intraEdges
-    ResumeInst {} -> intraEdges
-    InvokeInst { invokeUnwindLabel = ul, invokeNormalLabel = nl } ->
-      let (nei:_) = basicBlockInstructions nl
-          (uei:_) = basicBlockInstructions ul
-      in (instructionUniqueId ti, instructionUniqueId nei, OtherEdge):
-         (instructionUniqueId ti, instructionUniqueId uei, UnwindEdge):
+    Resume {} -> intraEdges
+    Invoke _ _ _ ul nl ->
+      let (nei:_) = bbStmts nl
+          (uei:_) = bbStmts ul
+      in (stmtUniqueId ti, stmtUniqueId nei, OtherEdge):
+         (stmtUniqueId ti, stmtUniqueId uei, UnwindEdge):
          intraEdges
     _ -> error "Not a terminator instruction"
   where
     -- Basic blocks are not allowed to be empty so this pattern match
     -- should never fail.
-    is@(_:rest) = basicBlockInstructions bb
-    intraEdges = map toIntraEdge (zip is rest)
-    toIntraEdge (s,d) = (instructionUniqueId s, instructionUniqueId d, OtherEdge)
-    ti = basicBlockTerminatorInstruction bb
+    is@(_:rest) = bbStmts bb
+    intraEdges = zipWith (curry toIntraEdge) is rest
+    toIntraEdge (s,d) = (stmtUniqueId s, stmtUniqueId d, OtherEdge)
+    ti = bbTerminatorStmt bb
 
     toIndirectEdge tgt =
-      let (ei:_) = basicBlockInstructions tgt
-      in (instructionUniqueId ti, instructionUniqueId ei, IndirectEdge)
+      let (ei:_) = bbStmts tgt
+      in (stmtUniqueId ti, stmtUniqueId ei, IndirectEdge)
 
     toCaseNode (val, tgt) =
-      let (ei:_) = basicBlockInstructions tgt
-      in (instructionUniqueId ti, instructionUniqueId ei, EqualityEdge val)
+      let (ei:_) = bbStmts tgt
+      in (stmtUniqueId ti, stmtUniqueId ei, EqualityEdge val)
 
-toGNode :: Instruction -> (Int, Instruction)
-toGNode i = (instructionUniqueId i, i)
+toGNode :: Stmt -> (Int, Stmt)
+toGNode i = (stmtUniqueId i, i)
 
 
 -- Dataflow analysis stuff
@@ -360,20 +360,20 @@ toGNode i = (instructionUniqueId i, i)
 data DataflowAnalysis m f where
   FwdDataflowAnalysis :: (Eq f, Monad m) => { analysisTop :: f
                                             , analysisMeet :: f -> f -> f
-                                            , analysisTransfer :: f -> Instruction -> m f
-                                            , analysisFwdEdgeTransfer :: Maybe (f -> Instruction -> m [(BasicBlock, f)])
+                                            , analysisTransfer :: f -> Stmt -> m f
+                                            , analysisFwdEdgeTransfer :: Maybe (f -> Stmt -> m [(BasicBlock, f)])
                                             } -> DataflowAnalysis m f
   BwdDataflowAnalysis :: (Eq f, Monad m) => { analysisTop :: f
                                             , analysisMeet :: f -> f -> f
-                                            , analysisTransfer ::  f -> Instruction -> m f
-                                            , analysisBwdEdgeTransfer :: Maybe ([(BasicBlock, f)] -> Instruction -> m f)
+                                            , analysisTransfer ::  f -> Stmt -> m f
+                                            , analysisBwdEdgeTransfer :: Maybe ([(BasicBlock, f)] -> Stmt -> m f)
                                             } -> DataflowAnalysis m f
 
 -- | Define a basic 'DataflowAnalysis'
 fwdDataflowAnalysis :: (Eq f, Monad m)
                        => f -- ^ Top
                        -> (f -> f -> f) -- ^ Meet
-                       -> (f -> Instruction -> m f) -- ^ Transfer
+                       -> (f -> Stmt -> m f) -- ^ Transfer
                        -> DataflowAnalysis m f
 fwdDataflowAnalysis top m t = FwdDataflowAnalysis top m t Nothing
 
@@ -381,7 +381,7 @@ fwdDataflowAnalysis top m t = FwdDataflowAnalysis top m t Nothing
 bwdDataflowAnalysis :: (Eq f, Monad m)
                        => f -- ^ Top
                        -> (f -> f -> f) -- ^ Meet
-                       -> (f -> Instruction -> m f) -- ^ Transfer
+                       -> (f -> Stmt -> m f) -- ^ Transfer
                        -> DataflowAnalysis m f
 bwdDataflowAnalysis top m t = BwdDataflowAnalysis top m t Nothing
 
@@ -399,8 +399,8 @@ bwdDataflowAnalysis top m t = BwdDataflowAnalysis top m t Nothing
 fwdDataflowEdgeAnalysis :: (Eq f, Monad m)
                            => f -- ^ Top
                            -> (f -> f -> f) -- ^ meet
-                           -> (f -> Instruction -> m f) -- ^ Transfer
-                           -> (f -> Instruction -> m [(BasicBlock, f)]) -- ^ Edge Transfer
+                           -> (f -> Stmt -> m f) -- ^ Transfer
+                           -> (f -> Stmt -> m [(BasicBlock, f)]) -- ^ Edge Transfer
                            -> DataflowAnalysis m f
 fwdDataflowEdgeAnalysis top m t e =
   FwdDataflowAnalysis top m t (Just e)
@@ -408,8 +408,8 @@ fwdDataflowEdgeAnalysis top m t e =
 bwdDataflowEdgeAnalysis :: (Eq f, Monad m)
                            => f -- ^ Top
                            -> (f -> f -> f) -- ^ meet
-                           -> (f -> Instruction -> m f) -- ^ Transfer
-                           -> ([(BasicBlock, f)] -> Instruction -> m f) -- ^ Edge Transfer
+                           -> (f -> Stmt -> m f) -- ^ Transfer
+                           -> ([(BasicBlock, f)] -> Stmt -> m f) -- ^ Edge Transfer
                            -> DataflowAnalysis m f
 bwdDataflowEdgeAnalysis top m t e =
   BwdDataflowAnalysis top m t (Just e)
@@ -429,7 +429,7 @@ data DataflowResult m f where
 
 instance (Show f) => Show (DataflowResult m f) where
   show (DataflowResult _ _ fb _) =
-    PP.pretty (map (\(f,s) -> (show f, show s)) (mapToList fb))
+    PP.pretty (map (bimap show show) (mapToList fb))
 
 instance (Eq f) => Eq (DataflowResult m f) where
   (DataflowResult c1 _ m1 d1) == (DataflowResult c2 _ m2 d2) =
@@ -442,10 +442,10 @@ instance (NFData f) => NFData (DataflowResult m f) where
 
 -- | Look up the dataflow fact at a particular Instruction.
 dataflowResultAt :: DataflowResult m f
-                    -> Instruction
+                    -> Stmt
                     -> m f
 dataflowResultAt (DataflowResult cfg (FwdDataflowAnalysis top meet transfer _) m dir) i = do
-  let Just bb = instructionBasicBlock i
+  let bb = stmtBasicBlock i
       Just lbl = M.lookup bb (cfgLabelMap cfg)
       initialFactAndInsts = findInitialFact bb lbl dir
   case initialFactAndInsts of
@@ -454,26 +454,26 @@ dataflowResultAt (DataflowResult cfg (FwdDataflowAnalysis top meet transfer _) m
   where
     findInitialFact bb lbl Fwd = do
       f0 <- lookupFact lbl m
-      return (f0, basicBlockInstructions bb)
+      return (f0, bbStmts bb)
     -- Here, look up the facts for all successors
     findInitialFact bb _ Bwd =
       case basicBlockSuccessors cfg bb of
         [] -> do
           f0 <- lookupFact (cfgExitLabel cfg) m
-          return (f0, reverse (basicBlockInstructions bb))
+          return (f0, reverse (bbStmts bb))
         ss -> do
           let trBlock b = do
                 l <- basicBlockToLabel cfg b
                 lookupFact l m
               f0 = foldr meet top (mapMaybe trBlock ss)
-          return (f0, reverse (basicBlockInstructions bb))
+          return (f0, reverse (bbStmts bb))
     replayTransfer [] _ = error "LLVM.Analysis.Dataflow.dataflowResult: replayed past end of block, impossible"
     replayTransfer (thisI:rest) r
       | thisI == i = transfer r i
       | otherwise = do
         r' <- transfer r thisI
         replayTransfer rest r'
-
+dataflowResultAt (DataflowResult _ BwdDataflowAnalysis {} _ _) _ = error "dataflowResultAt of backwards analysis not implemented"
 
 -- | Look up the dataflow fact at the virtual exit note.  This
 -- combines the results along /all/ paths, including those ending in
