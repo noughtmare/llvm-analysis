@@ -94,7 +94,7 @@ edgeTransfer s i = return $ fromMaybe [] $ do
          ]
 
 isNullPtr :: Value -> Bool
-isNullPtr (Value _ _ ValNull) = True
+isNullPtr (valValue -> ValNull) = True
 isNullPtr _ = False
 
 data NullInfoError = NotABr Stmt

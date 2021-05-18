@@ -53,6 +53,7 @@ import System.FilePath
 import System.FilePath.Glob
 import System.IO.Error
 import System.IO.Temp
+import System.IO (Handle, openFile, IOMode (ReadMode))
 import System.Process as P
 
 import Test.Framework ( defaultMain, Test )
@@ -81,7 +82,7 @@ data TestDescriptor =
 -- return the expected output.
 readInputAndExpected :: (Read a)
                         => [String] -- ^ Arguments for opt
-                        -> (FilePath -> IO Module) -- ^ A function to turn a bitcode file bytestring into a Module
+                        -> (FilePath -> Handle -> IO Module) -- ^ A function to turn a bitcode file bytestring into a Module
                         -> (FilePath -> FilePath) -- ^ The function to map an input file name to the expected output file
                         -> FilePath -- ^ The input file
                         -> IO (FilePath, Module, a)
@@ -99,7 +100,7 @@ readInputAndExpected optOpts parseFile expectedFunc inputFile = do
 -- The bitcode parser is taken as an input so that this library does
 -- not have a direct dependency on any FFI code.
 testAgainstExpected :: [String] -- ^ Options for opt
-                       -> (FilePath -> IO Module) -- ^ A function to turn a bitcode file bytestring into a Module
+                       -> (FilePath -> Handle -> IO Module) -- ^ A function to turn a bitcode file bytestring into a Module
                        -> [TestDescriptor] -- ^ The list of test suites to run
                        -> IO ()
 testAgainstExpected optOpts parseFile testDescriptors = do
@@ -142,7 +143,7 @@ optify args inp optFile = do
 -- kinds of errors.  It can also raise IOErrors.
 buildModule :: [String]                 -- ^ Front-end options (passed to clang) for the module.
             -> [String]                 -- ^ Optimization options (passed to opt) for the module.  opt is not run if the list is empty
-            -> (FilePath -> IO Module)  -- ^ A function to turn a bitcode file into a Module
+            -> (FilePath -> Handle -> IO Module)  -- ^ A function to turn a bitcode file into a Module
             -> FilePath                 -- ^ The input file (either bitcode or C/C++)
             -> IO Module
 buildModule clangOpts optOpts parseFile inputFilePath = do
@@ -158,24 +159,31 @@ buildModule clangOpts optOpts parseFile inputFilePath = do
     _ -> E.throwIO $ NoBuildMethodForInput inputFilePath
   where
     simpleBuilder inp
-      | null optOpts = parseFile inp
+      | null optOpts = parseFile inp =<< openFile inp ReadMode
       | otherwise =
-        withSystemTempFile ("opt_" ++ takeFileName inp) $ \optFname _ -> do
+        withSystemTempFile ("opt_" ++ takeFileName inp) $ \optFname optFHandle -> do
           optify optOpts inp optFname
-          parseFile optFname
+          parseFile optFname optFHandle
 
     clangBuilder inp driver =
-      withSystemTempFile ("base_" ++ takeFileName inp) $ \baseFname _ -> do
-        let cOpts     = clangOpts ++ ["-emit-llvm", "-o" , baseFname, "-c", inp]
+      withSystemTempFile ("base_" ++ takeFileName inp) $ \baseFname baseFHandle -> do
+        let cOpts     =
+              clangOpts
+                ++ -- retain nice block labels
+                   [ "-fno-discard-value-names"
+                   -- don't optimize with clang, but don't disable optimizations either
+                   , "-O1", "-mllvm" , "-disable-llvm-optzns"
+                   , "-emit-llvm", "-o" , baseFname, "-c", inp
+                   ]
         (_, _, _, p) <- createProcess $ proc driver cOpts
         rc <- waitForProcess p
         when (rc /= ExitSuccess) $ E.throwIO $ ClangFailed inputFilePath rc
         case null optOpts of
-          True  -> parseFile baseFname
+          True  -> parseFile baseFname baseFHandle
           False ->
-            withSystemTempFile ("opt_" ++ takeFileName inp) $ \optFname _ -> do
+            withSystemTempFile ("opt_" ++ takeFileName inp) $ \optFname optFHandle -> do
               optify optOpts baseFname optFname
-              parseFile optFname
+              parseFile optFname optFHandle
 
 -- | Find a suitable @opt@ binary in the user's PATH
 --

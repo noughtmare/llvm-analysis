@@ -17,7 +17,12 @@ import LLVM.Analysis
 import LLVM.Analysis.ClassHierarchy
 import LLVM.Analysis.Util.Names
 import LLVM.Analysis.Util.Testing
-import LLVM.Parse
+
+import Data.LLVM.BitCode (parseBitCode)
+import Text.LLVM.Resolve (resolve)
+import qualified Data.ByteString as B
+import Data.Either (fromRight)
+import LLVM.Types
 
 main :: IO ()
 main = do
@@ -44,7 +49,11 @@ main = do
   withArgs [] $ testAgainstExpected opts parser testDescriptors
   where
     opts = [ "-mem2reg", "-basicaa", "-gvn" ]
-    parser = parseLLVMFile defaultParserOptions
+    parser n h = do
+      bc <- B.hGetContents h
+      m <- fromRight (error "Parse error") <$> parseBitCode bc
+      return (resolve m)
+
 
 analyzeHierarchy :: Module -> Map String (Set String)
 analyzeHierarchy = classHierarchyToTestFormat . runCHA
@@ -53,10 +62,10 @@ findCallees :: Module -> Map String (Set String)
 findCallees m = M.fromList $ mapMaybe (firstCalleeTargets cha) funcs
   where
     cha = runCHA m
-    funcs = moduleDefinedFunctions m
+    funcs = modDefines m
 
-functionToDemangledName :: Function -> String
-functionToDemangledName f =
+defToDemangledName :: Define -> String
+defToDemangledName f =
   case parseFunctionName f of
     Left e -> error e
     Right sname ->
@@ -64,32 +73,28 @@ functionToDemangledName f =
         Nothing -> error ("Unable to unparse function name: " ++ show sname)
         Just n -> n
 
-firstCalleeTargets :: CHA -> Function -> Maybe (String, Set String)
-firstCalleeTargets cha f = do
-  case isConstructor f || isVirtualThunk f of
-    True -> Nothing
-    False -> do
-      firstCall <- find isCallInst insts
+firstCalleeTargets :: CHA -> Define -> Maybe (String, Set String)
+firstCalleeTargets cha f
+  | isConstructor f || isVirtualThunk f = Nothing
+  | otherwise = do
+      firstCall <- find isCall instrs
       callees <- resolveVirtualCallee cha firstCall
-      return (fname, S.fromList (map functionToDemangledName callees))
+      return (fname, S.fromList (map defToDemangledName callees))
   where
-    insts = functionInstructions f
-    fname = functionToDemangledName f
+    instrs = map stmtInstr (defStmts f)
+    fname = defToDemangledName f
 
-isVirtualThunk :: Function -> Bool
+isVirtualThunk :: Define -> Bool
 isVirtualThunk f =
   case dname of
-    Left _ -> False
-    Right sname ->
-      case sname of
-        ABI.OverrideThunk _ _ -> True
-        ABI.OverrideThunkCovariant _ _ _ -> True
-        _ -> False
+    Right (ABI.OverrideThunk _ _) -> True
+    Right (ABI.OverrideThunkCovariant _ _ _) -> True
+    _ -> False
   where
-    n = identifierAsString (functionName f)
+    n = (\(Symbol n) -> n) (defName f)
     dname = ABI.demangleName n
 
-isConstructor :: Function -> Bool
+isConstructor :: Define -> Bool
 isConstructor f =
   case dname of
     Left _ -> False
@@ -100,11 +105,11 @@ isConstructor f =
         [ABI.C3] -> True
         _ -> False
   where
-    n = identifierAsString (functionName f)
+    n = (\(Symbol n) -> n) (defName f)
     dname = ABI.demangleName n
 
-isCallInst :: Instruction -> Bool
-isCallInst i =
+isCall :: Instr -> Bool
+isCall i =
   case i of
-    CallInst {} -> True
+    Call {} -> True
     _ -> False

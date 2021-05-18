@@ -25,12 +25,14 @@ import LLVM.Analysis.PointsTo
 import Constraints.Set.Solver
 -- import Constraints.Set.Internal
 
+import Debug.Trace
+
 #if defined(DEBUGCONSTRAINTS)
 import Debug.Trace
 #endif
 
 valueName :: Value -> String
-valueName = error "TODO figure this out"
+valueName = error "TODO valueName"
 
 -- A monad to manage fresh variable generation
 data ConstraintState = ConstraintState { freshIdSrc :: !Int  }
@@ -75,19 +77,19 @@ andersenPointsTo :: Andersen -> Value -> [Value]
 andersenPointsTo (Andersen ss) v =
   either fromError (map fromLocation) (leastSolution ss var)
   where
-    var = case v of
-      Value _ _ (ValIdent (IdentValArgument a)) -> ArgLocation a
-      Value _ _ (ValIdent (IdentValStmt i@Stmt {stmtInstr = Call {}})) -> RetLocation i
-      Value _ _ (ValIdent (IdentValStmt i@Stmt {stmtInstr = Invoke {}})) -> RetLocation i
-      Value _ _ (ValIdent (IdentValStmt i@Stmt {stmtInstr = Load {}})) -> LoadedLocation i
-      Value _ _ (ValIdent (IdentValStmt i@Stmt {stmtInstr = Select {}})) -> PhiCopy i
-      Value _ _ (ValIdent (IdentValStmt i@Stmt {stmtInstr = Phi {}})) -> PhiCopy i
-      Value _ _ (ValIdent (IdentValStmt Stmt {stmtInstr = GEP _ base _})) ->
+    var = case valValue (valueContent' v) of
+      ValIdent (IdentValArgument a) -> ArgLocation a
+      ValIdent (IdentValStmt i@Stmt {stmtInstr = Call {}}) -> RetLocation i
+      ValIdent (IdentValStmt i@Stmt {stmtInstr = Invoke {}}) -> RetLocation i
+      ValIdent (IdentValStmt i@Stmt {stmtInstr = Load {}}) -> LoadedLocation i
+      ValIdent (IdentValStmt i@Stmt {stmtInstr = Select {}}) -> PhiCopy i
+      ValIdent (IdentValStmt i@Stmt {stmtInstr = Phi {}}) -> PhiCopy i
+      ValIdent (IdentValStmt Stmt {stmtInstr = GEP _ base _}) ->
         -- should be a FieldLoc
         GEPLocation (getTargetIfLoad base)
       _ -> LocationSet v
     fromError :: ConstraintError Var Constructor -> [Value]
-    fromError = const []
+    fromError = error . show
     fromLocation :: SetExp -> Value
     fromLocation (ConstructedTerm Ref _ [ConstructedTerm (Atom val) _ _, _, _]) = val
     fromLocation se = error ("Unexpected set expression in result " ++ show se)
@@ -109,7 +111,7 @@ pta ignore m = do
   initConstraints <- foldM globalInitializerConstraints [] (modGlobals m)
   funcConstraints <- foldM functionConstraints [] (modDefines m)
   let is = initConstraints ++ funcConstraints
-      sol = either throwErr id (solveSystem is)
+      sol = {- trace ("SOLVESYSTEM:\n" ++ show is) $ -} either throwErr id (solveSystem is)
   return $! Andersen sol
   where
     loadVar ldInst = setVariable (LoadedLocation ldInst)
@@ -124,7 +126,7 @@ pta ignore m = do
     -- instance of a struct field maps to the same struct field slot
     -- indexed by type/position).
     virtArgVar sa ix =
-      case sa of
+      case valueContent' sa of
         ValInstr (GEP _ base ixs) ->
           case fieldDescriptor base ixs of
             Just (t, fldno) -> setVariable (VirtualFieldArg t fldno ix)
@@ -145,15 +147,15 @@ pta ignore m = do
     -- Still need a few more.
 
     setVarFor v =
-      case v of
-        Value _ _ (ValIdent (IdentValStmt i@Stmt { stmtInstr = Load {}})) -> return $ loadVar i
-        Value _ _ (ValIdent (IdentValStmt i@Stmt { stmtInstr = Call {}})) -> return $ returnVar i
-        Value _ _ (ValIdent (IdentValStmt i@Stmt { stmtInstr = Invoke {}})) -> return $ returnVar i
-        Value _ _ (ValIdent (IdentValStmt i@Stmt { stmtInstr = Phi {}})) -> return $ phiVar i
-        Value _ _ (ValIdent (IdentValStmt i@Stmt { stmtInstr = Select {}})) -> return $ phiVar i
-        Value _ _ (ValIdent (IdentValStmt Stmt { stmtInstr = (GEP _ base _)})) ->
+      case valueContent' v of
+        (valValue -> ValIdent (IdentValStmt i@Stmt { stmtInstr = Load {}})) -> return $ loadVar i
+        (valValue -> ValIdent (IdentValStmt i@Stmt { stmtInstr = Call {}})) -> return $ returnVar i
+        (valValue -> ValIdent (IdentValStmt i@Stmt { stmtInstr = Invoke {}})) -> return $ returnVar i
+        (valValue -> ValIdent (IdentValStmt i@Stmt { stmtInstr = Phi {}})) -> return $ phiVar i
+        (valValue -> ValIdent (IdentValStmt i@Stmt { stmtInstr = Select {}})) -> return $ phiVar i
+        (valValue -> ValIdent (IdentValStmt Stmt { stmtInstr = (GEP _ base _)})) ->
           return $ gepVar (getTargetIfLoad base)
-        Value _ _ (ValIdent (IdentValArgument a)) -> return $ argVar a
+        (valValue -> ValIdent (IdentValArgument a)) -> return $ argVar a
         _ -> Nothing
 
     -- Have to be careful handling phi nodes - those will actually need to
@@ -175,7 +177,7 @@ pta ignore m = do
         -- This case is a bit of a hack to deal with the conversion from
         -- an array type to a pointer to the first element (using a
         -- constant GEP with all zero indices).
-        Value _ _ (ValConstExpr (ConstGEP _ _ _ (base:is))) | error "TODO figure this out" ->
+        (valValue -> ValConstExpr (ConstGEP _ _ _ (base:is))) ->
           case valType base of
             PtrTo (Array _ _)
               | all isConstantZero is -> setVariable (LocationSet base)
@@ -194,14 +196,16 @@ pta ignore m = do
     globalInitializerConstraints acc global =
       case globalValue global of
         Nothing -> return acc
-        Just (Value _ _ (ValConstExpr _)) -> return acc
-        Just i -> do
+        Just (valValue -> ValLabel _) -> error "TODO globalInitializerConstraints ValLabel"
+        Just (valValue -> ValIdent _) -> error "TODO globalInitializerConstraints ValIdent"
+        Just i@(valValue -> ValSymbol _) -> do
           f1 <- freshVariable
           f2 <- freshVariable
           let c1 = loc (toValue global) <=! ref [ universalSet, universalSet, f1 ]
               c2 = ref [ emptySet, loc i, emptySet ] <=! ref [ universalSet, f2, emptySet ]
               c3 = f2 <=! f1
           return $ c1 : c2 : c3 : acc
+        Just _ -> return acc
 
     functionConstraints acc = foldM stmtConstraints acc . defStmts
     stmtConstraints acc i =
@@ -229,11 +233,11 @@ pta ignore m = do
             acc' <- addVirtualConstraints acc sa sv
             return $ c1 : c2 : c3 : acc' `traceConstraints` ("Inst: " ++ show i, [c1,c2,c3])
 
-        Call _ _ (Value _ _ (ValSymbol (SymValDefine f))) args -> directCallConstraints acc (toValue i) f args
-        Invoke _ (Value _ _ (ValSymbol (SymValDefine f))) args _ _ -> directCallConstraints acc (toValue i) f args
+        Call _ _ (valueContent' -> (valValue -> ValSymbol (SymValDefine f))) args -> directCallConstraints acc (toValue i) f args
+        Invoke _ (valueContent' -> (valValue -> ValSymbol (SymValDefine f))) args _ _ -> directCallConstraints acc (toValue i) f args
         -- For now, don't model calls to external functions
-        Call _ _ (Value _ _ (ValSymbol (SymValDeclare _))) _ -> return acc
-        Invoke _ (Value _ _ (ValSymbol (SymValDeclare _))) _ _ _ -> return acc
+        Call _ _ (valueContent' -> (valValue -> ValSymbol (SymValDeclare _))) _ -> return acc
+        Invoke _ (valueContent' -> (valValue -> ValSymbol (SymValDeclare _))) _ _ _ -> return acc
         Call _ _ callee args -> indirectCallConstraints acc callee args
         Invoke _ callee args _ _ -> indirectCallConstraints acc callee args
 
@@ -255,7 +259,7 @@ pta ignore m = do
         -- the constraints into the proper place in the constraint
         -- graph.  It may be possible to keep it entirely local with
         -- extra variables as is done for function pointers.
-        GEP _ (ValInstr (Load la _ _)) [_]
+        GEP _ (valueContent' -> ValInstr (Load la _ _)) [_]
           | ignore la || ignore (toValue i) -> return acc
           | otherwise -> do
             f1 <- freshVariable
@@ -281,7 +285,7 @@ pta ignore m = do
             acc' <- addVirtualConstraints acc (toValue i) base
             return $ c1 : c2 : c3 : acc' `traceConstraints` (concat ["GEP: " ++ show i], [c1,c2,c3])
 
-        GEP _ base [Value _ _ (ValInteger 0), _] ->
+        GEP _ base [valValue -> ValInteger 0, _] ->
           case valType base of
             PtrTo Array {} -> do
               f1 <- freshVariable
@@ -328,9 +332,9 @@ pta ignore m = do
     addVirtualArgConstraints acc sa sv
       | not (isFuncPtrType (valType sv)) = return acc
       | otherwise =
-        case sv of
+        case valueContent' sv of
           -- Connect the virtuals for sa to the actuals of f
-          Value _ _ (ValSymbol (SymValDefine f)) -> do
+          (valValue -> ValSymbol (SymValDefine f)) -> do
             let formals = defArgs f
             foldM (constrainVirtualArg sa) acc (zip [0..] formals)
           -- Otherwise, copy virtuals from old ref to new ref
@@ -397,23 +401,26 @@ pta ignore m = do
 -- | Return the innermost type and the index into that type accessed
 -- by the GEP instruction with the given base and indices.
 fieldDescriptor :: Value -> [Value] -> Maybe (Type, Int)
-fieldDescriptor base ixs =
-  case (valType base, ixs) of
-    -- A pointer being accessed as an array
-    (_, [_]) -> Nothing
-    -- An actual array type (first index should be zero here)
-    (PtrTo Array {}, Value _ _ (ValInteger 0):_) ->
-      Nothing
-    -- It doesn't matter what the first index is; even if it isn't
-    -- zero (as in it *is* an array access), we only care about the
-    -- ultimate field access and not the array.  Raw arrays are taken
-    -- care of above.
-    (PtrTo t, _:rest) -> return $ walkType t rest
-    _ -> Nothing
+fieldDescriptor base ixs0 = go (valType base) ixs0 where
+  -- A vector of pointers
+  go (Vector _ x) ixs = go' x ixs
+  go x ixs = go' x ixs
+
+  -- A pointer being accessed as an array
+  go' _ [_] = Nothing
+  -- An actual array type (first index should be zero here)
+  go' (PtrTo Array {}) ((valValue . valueContent' -> ValInteger 0):_) =
+    Nothing
+  -- It doesn't matter what the first index is; even if it isn't
+  -- zero (as in it *is* an array access), we only care about the
+  -- ultimate field access and not the array.  Raw arrays are taken
+  -- care of above.
+  go' (PtrTo t) (_:rest) = return $ walkType t rest
+  go' _ _ = Nothing
 
 walkType :: Type -> [Value] -> (Type, Int)
 walkType t [] = error ("LLVM.Analysis.PointsTo.Andersen.walkType: expected non-empty index list for " ++ show t)
-walkType t [Value _ _ (ValInteger iv)] =
+walkType t [valValue -> ValInteger iv] =
   (t, fromIntegral iv)
 walkType t (ix:ixs) =
   case t of
@@ -422,6 +429,7 @@ walkType t (ix:ixs) =
     -- struct types (e.g., this is an array member of a struct), we
     -- need to return the index of the array... FIXME
     Array _ t' -> walkType t' ixs
+    Vector _ t' -> walkType t' ixs
     Struct _ ts _ ->
       case valValue ix of
         ValInteger (fromIntegral -> iv) ->
@@ -432,11 +440,11 @@ walkType t (ix:ixs) =
     _ -> error ("LLVM.Analysis.PointsTo.Andersen.walkType: unexpected type " ++ show ix ++ " in " ++ show t)
 
 isConstantZero :: Value -> Bool
-isConstantZero (Value _ _ (ValInteger 0)) = True
+isConstantZero (valueContent' -> (valValue -> ValInteger 0)) = True
 isConstantZero _ = False
 
 getTargetIfLoad :: Value -> Value
-getTargetIfLoad (ValInstr (Load la _ _)) = la
+getTargetIfLoad (valueContent' -> ValInstr (Load la _ _)) = la
 getTargetIfLoad v = v
 
 -- TODO:

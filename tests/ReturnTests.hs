@@ -17,7 +17,14 @@ import LLVM.Analysis.CallGraphSCCTraversal
 import LLVM.Analysis.PointsTo.TrivialFunction
 import LLVM.Analysis.NoReturn
 import LLVM.Analysis.Util.Testing
-import LLVM.Parse
+-- import LLVM.Parse
+
+import Data.LLVM.BitCode (parseBitCode)
+import Text.LLVM.Resolve (resolve)
+import qualified Data.ByteString as B
+import Data.Either (fromRight)
+import LLVM.Types
+
 
 main :: IO ()
 main = do
@@ -35,19 +42,23 @@ main = do
   withArgs [] $ testAgainstExpected opts parser testDescriptors
   where
     opts = ["-mem2reg", "-basicaa", "-gvn"]
-    parser = parseLLVMFile defaultParserOptions
+    parser n h = do
+      bc <- B.hGetContents h
+      m <- fromRight (error "Parse error") <$> parseBitCode bc
+      -- print m
+      return (resolve m)
 
-exitTest :: (Monad m) => ExternalFunction -> m Bool
+exitTest :: Monad m => Declare -> m Bool
 exitTest ef = return $ "@exit" == efname
   where
-    efname = show (externalFunctionName ef)
+    efname = (\(Symbol s) -> "@" ++ s) (decName ef)
 
-nameToString :: Function -> String
-nameToString = show . functionName
+nameToString :: Define -> String
+nameToString = (\(Symbol s) -> "@" ++ s) . defName
 
-runNoReturnAnalysis :: CallGraph -> (ExternalFunction -> Identity Bool) -> [Function]
+runNoReturnAnalysis :: CallGraph -> (Declare -> Identity Bool) -> [Define]
 runNoReturnAnalysis cg extSummary =
-  let analysis :: [CFG] -> HashSet Function -> HashSet Function
+  let analysis :: [CFG] -> HashSet Define -> HashSet Define
       analysis = callGraphAnalysisM runIdentity (noReturnAnalysis extSummary)
       res = callGraphSCCTraversal cg analysis mempty
   in toList res

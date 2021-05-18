@@ -1,3 +1,4 @@
+{-# LANGUAGE ViewPatterns #-}
 -- | This module implements a trivial points-to analysis that is
 -- intended only for fast conservative callgraph construction.  All
 -- function pointers can point to all functions with compatible types.
@@ -59,14 +60,14 @@ trivialMayAlias _ v1 v2 = valType v1 == valType v2
 trivialPointsTo :: TrivialFunction -> Value -> [Value]
 trivialPointsTo p@(TrivialFunction m) v =
   case v of
-    Value _ _ (ValSymbol SymValDefine {}) -> [v]
-    Value _ _ (ValSymbol SymValDeclare {}) -> [v]
-    Value _ _ (ValSymbol (SymValAlias ga)) -> trivialPointsTo p (toValue ga)
+    (valValue -> ValSymbol SymValDefine {}) -> [v]
+    (valValue -> ValSymbol SymValDeclare {}) -> [v]
+    (valValue -> ValSymbol (SymValAlias ga)) -> trivialPointsTo p (toValue ga)
     ValInstr (Conv BitCast c _) ->
       case c of
-        Value _ _ (ValSymbol SymValDefine {}) -> trivialPointsTo p c
-        Value _ _ (ValSymbol SymValDeclare {}) -> trivialPointsTo p c
-        Value _ _ (ValSymbol SymValAlias {}) -> trivialPointsTo p c
+        (valValue -> ValSymbol SymValDefine {}) -> trivialPointsTo p c
+        (valValue -> ValSymbol SymValDeclare {}) -> trivialPointsTo p c
+        (valValue -> ValSymbol SymValAlias {}) -> trivialPointsTo p c
         _ -> S.toList $ M.lookupDefault S.empty (derefPointer v) m
     _ -> S.toList $ M.lookupDefault S.empty (derefPointer v) m
 

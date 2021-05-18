@@ -63,7 +63,7 @@ library
                  fgl >= 5.4,
                  text >= 0.11 && < 2,
                  boomerang,
-                 ifscs >= 0.2.0.1 && < 0.3,
+                 ifscs >= 0.2.0.0 && < 0.3,
                  array,
                  bytestring,
                  containers,
@@ -107,7 +107,7 @@ library
   if flag(DebugAndersenConstraints)
     cpp-options: "-DDEBUGCONSTRAINTS"
   ghc-options: -Wall -funbox-strict-fields -fdefer-typed-holes
-  ghc-prof-options: -auto-all
+  -- ghc-prof-options: -auto-all
 
 test-suite CallGraphTests
   default-language: Haskell2010
@@ -116,9 +116,9 @@ test-suite CallGraphTests
   hs-source-dirs: tests
   build-depends: base == 4.*,
                  HUnit, filepath, containers, bytestring,
-                 llvm-analysis >= 0.3.0,
-                 llvm-data-interop >= 0.3.0
+                 llvm-analysis, llvm-pretty-bc-parser, llvm-pretty-referential
   ghc-options: -Wall
+  -- -with-rtsopts=-xc
 
 test-suite BlockReturnTests
   default-language: Haskell2010
@@ -127,8 +127,8 @@ test-suite BlockReturnTests
   hs-source-dirs: tests
   build-depends: base == 4.*,
                  containers, HUnit, filepath,
-                 llvm-analysis >= 0.3.0,
-                 llvm-data-interop >= 0.3.0
+                 llvm-analysis, bytestring,
+                 llvm-pretty-bc-parser, llvm-pretty-referential
   ghc-options: -Wall
 
 test-suite ReturnTests
@@ -138,8 +138,8 @@ test-suite ReturnTests
                  transformers >= 0.3,
                  containers, filepath, HUnit,
                  unordered-containers,
-                 llvm-data-interop >= 0.3.0,
-                 llvm-analysis >= 0.3.0
+                 llvm-analysis, bytestring,
+                 llvm-pretty-bc-parser, llvm-pretty-referential
   ghc-options: -Wall -rtsopts
   main-is: ReturnTests.hs
   hs-source-dirs: tests
@@ -149,8 +149,8 @@ test-suite AccessPathTests
   type: exitcode-stdio-1.0
   build-depends: base == 4.*,
                  containers, filepath, HUnit,
-                 llvm-data-interop >= 0.3.0,
-                 llvm-analysis >= 0.3.0
+                 llvm-analysis, bytestring,
+                 llvm-pretty-bc-parser, llvm-pretty-referential
   ghc-options: -Wall -rtsopts
   main-is: AccessPathTests.hs
   hs-source-dirs: tests
@@ -160,8 +160,8 @@ test-suite ClassHierarchyTests
   type: exitcode-stdio-1.0
   build-depends: base == 4.*,
                  containers, filepath, HUnit, uniplate,
-                 llvm-analysis >= 0.3.0,
-                 llvm-data-interop >= 0.3.0,
+                 llvm-analysis, bytestring,
+                 llvm-pretty-bc-parser, llvm-pretty-referential,
                  itanium-abi
   ghc-options: -Wall -rtsopts
   main-is: ClassHierarchyTests.hs
@@ -172,8 +172,8 @@ test-suite AndersenTests
   type: exitcode-stdio-1.0
   build-depends: base == 4.*,
                  containers, filepath, HUnit,
-                 llvm-data-interop >= 0.3.0,
-                 llvm-analysis >= 0.3.0
+                 llvm-analysis, bytestring,
+                 llvm-pretty-bc-parser, llvm-pretty-referential
 
   if flag(DebugAndersenGraph)
     build-depends: graphviz

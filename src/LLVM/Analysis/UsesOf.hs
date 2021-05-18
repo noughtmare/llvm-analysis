@@ -12,7 +12,7 @@ import Data.Maybe ( fromMaybe )
 
 import LLVM.Analysis
 
-newtype UseSummary = UseSummary (Map Value [Instr])
+newtype UseSummary = UseSummary (Map Value [Stmt])
 
 -- | Compute the uses of every value in the 'Module'
 --
@@ -30,13 +30,13 @@ computeUsesOf m = UseSummary $ fmap S.toList uses
   where
     uses = F.foldl' funcUses M.empty fs
     fs = modDefines m
-    funcUses acc f = F.foldl' addInstUses acc (map stmtInstr (defStmts f))
-    addInstUses acc i = F.foldl' (addUses i) acc (instructionOperands i)
+    funcUses acc f = F.foldl' addInstUses acc (defStmts f)
+    addInstUses acc i = F.foldl' (addUses i) acc (instructionOperands (stmtInstr i))
     addUses i acc v = M.insertWith S.union v (S.singleton i) acc
 
 -- | > usedBy summ val
 --
 -- Find the instructions using @val@ in the function that @summ@ was
 -- computed for.
-usedBy :: UseSummary -> Value -> [Instr]
+usedBy :: UseSummary -> Value -> [Stmt]
 usedBy (UseSummary m) v = fromMaybe [] $ M.lookup v m

@@ -10,7 +10,12 @@ import Test.HUnit ( assertEqual )
 import LLVM.Analysis
 import LLVM.Analysis.AccessPath
 import LLVM.Analysis.Util.Testing
-import LLVM.Parse
+
+import Data.LLVM.BitCode (parseBitCode)
+import Text.LLVM.Resolve (resolve)
+import qualified Data.ByteString as B
+import Data.Either (fromRight)
+import LLVM.Types
 
 main :: IO ()
 main = do
@@ -28,27 +33,30 @@ main = do
   withArgs [] $ testAgainstExpected opts parser testDescriptors
   where
     opts = [ "-mem2reg", "-basicaa", "-gvn" ]
-    parser = parseLLVMFile defaultParserOptions
+    parser n h = do
+      bc <- B.hGetContents h
+      m <- fromRight (error "Parse error") <$> parseBitCode bc
+      -- print m
+      return (resolve m)
+
 
 type Summary = (String, [AccessType])
 
 -- Feed the first store instruction in each function to accessPath and
 -- map each function to its path.
 extractFirstPath :: Module -> Map String Summary
-extractFirstPath m = M.fromList $ map extractFirstFuncPath funcs
-  where
-    funcs = moduleDefinedFunctions m
+extractFirstPath m = M.fromList $ map extractFirstFuncPath (modDefines m)
 
-extractFirstFuncPath :: Function -> (String, Summary)
-extractFirstFuncPath f = (show (functionName f), summ)
+extractFirstFuncPath :: Define -> (String, Summary)
+extractFirstFuncPath f = (prettySymbol (defName f), summ)
   where
-    allInsts = concatMap basicBlockInstructions (functionBody f)
-    Just firstStore = find isStore allInsts
+    allStmts = concatMap bbStmts (defBody f)
+    Just firstStore = find (isStore . stmtInstr) allStmts
     Just p = accessPath firstStore
     p' = abstractAccessPath p
-    summ = (show (abstractAccessPathBaseType p'),
+    summ = (prettyType (abstractAccessPathBaseType p'),
             abstractAccessPathComponents p')
 
-isStore :: Instruction -> Bool
-isStore StoreInst {} = True
+isStore :: Instr -> Bool
+isStore Store {} = True
 isStore _ = False

@@ -67,9 +67,9 @@ abstractAccessPathComponents = map snd . abstractAccessPathTaggedComponents
 -- instance Show AbstractAccessPath where
 --   show = pretty
 
--- instance Hashable AbstractAccessPath where
---   hashWithSalt s (AbstractAccessPath bt et cs) =
---     s `hashWithSalt` bt `hashWithSalt` et `hashWithSalt` cs
+instance Hashable AbstractAccessPath where
+  hashWithSalt s (AbstractAccessPath bt et cs) =
+    s `hashWithSalt` bt `hashWithSalt` et `hashWithSalt` cs
 
 appendAccessPath :: (Failure AccessPathError m)
                     => AbstractAccessPath
@@ -114,7 +114,9 @@ data AccessPath =
              , accessPathEndType :: Type
              , accessPathTaggedComponents :: [(Type, AccessType)]
              }
-  deriving (Generic, Eq, Ord)
+  deriving (Generic, Eq, Ord, Show)
+
+instance NFData AccessPath
 
 accessPathComponents :: AccessPath -> [AccessType]
 accessPathComponents = map snd . accessPathTaggedComponents
@@ -207,16 +209,16 @@ accessPath i = case stmtInstr i of
       -- FIXME: Should this really get a deref tag?  Unclear...
            return $! addDeref $ go
     (AccessPath
-      (Value (getType i) (stmtUniqueId i) (ValIdent (IdentValStmt i)))
+      (toValue i)
       (getType i)
       (getType i)
       []
     )
     (getType i)
-    (Value (getType i) (stmtUniqueId i) (ValIdent (IdentValStmt i)))
+    (toValue i)
     -- If this is an argument to a function call, it could be a
     -- bitcasted GEP or Load
-  Conv BitCast (Value _ _ (ValIdent (IdentValStmt i'))) _ ->
+  Conv BitCast (valValue -> ValIdent (IdentValStmt i')) _ ->
     accessPath i'
   _ -> F.failure (NotMemoryInstruction i)
   where
@@ -301,15 +303,6 @@ externalizeAccessPath accPath =
 
 -- Internal Helpers
 
-stripPointerTypes :: Type -> Type
-stripPointerTypes x = case x of
-  PtrTo x' -> stripPointerTypes x'
-  _ -> x
-
-structTypeToName :: Type -> Maybe String
-structTypeToName (Struct (Right (Ident name)) _ _) = pure name
-structTypeToName _ = fail "Not a named struct"
-
 derefPointerType :: Type -> Type
 derefPointerType (PtrTo p) = p
 derefPointerType t = error ("LLVM.Analysis.AccessPath.derefPointerType: Type is not a pointer type: " ++ show t)
@@ -331,6 +324,7 @@ gepIndexFold base (ptrIx : ixs) =
         -- pointer would have to go through a Load...  check this
         PtrTo ty' -> (ty', (ty, AccessArray) : acc)
         Array _ ty' -> (ty', (ty, AccessArray) : acc)
+        Vector _ ty' -> (ty', (ty, AccessArray) : acc) -- TODO: this is not really an array
         Struct _ ts _ ->
           case valValue ix of
             ValInteger fldNo ->

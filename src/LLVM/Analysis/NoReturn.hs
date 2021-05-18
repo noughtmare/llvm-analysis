@@ -1,4 +1,5 @@
 {-# LANGUAGE NoMonomorphismRestriction #-}
+{-# LANGUAGE ViewPatterns #-}
 -- | An analysis to identify functions that never return to their
 -- caller.  This only counts calls to exit, abort, or similar.
 -- Notably, exceptions are not considered since the caller can catch
@@ -77,13 +78,14 @@ noReturnAnalysis extSummary cfgLike summ = do
 returnTransfer :: (Monad m) => ReturnInfo -> Stmt -> AnalysisMonad m ReturnInfo
 returnTransfer ri i =
   case stmtInstr i of
-    Call _ _ (Value _ _ (ValSymbol calledFunc)) _ ->
+    Call _ _ (valValue -> ValSymbol calledFunc) _ ->
       dispatchCall ri calledFunc
-    Invoke _ (Value _ _ (ValSymbol calledFunc)) _ _ _ ->
+    Invoke _ (valValue -> ValSymbol calledFunc) _ _ _ ->
       dispatchCall ri calledFunc
     Unreachable {} -> return WillNeverReturn
     Resume {} -> return WillNeverReturn
     Ret {} -> return Returned
+    RetVoid -> return Returned
     _ -> return ri
 
 dispatchCall :: (Monad m) => ReturnInfo -> SymValue -> AnalysisMonad m ReturnInfo

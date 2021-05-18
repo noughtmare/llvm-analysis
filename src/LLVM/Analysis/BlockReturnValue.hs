@@ -37,6 +37,8 @@ import LLVM.Analysis.CFG
 
 import LLVM.Analysis.Dominance
 
+import Debug.Trace
+
 data BlockReturns = BlockReturns (HashMap BasicBlock Value) (HashMap BasicBlock (HashSet Value)) (HashSet BasicBlock)
 
 class HasBlockReturns a where
@@ -109,8 +111,8 @@ labelBlockReturns funcLike =
 
     pushReturnValues exitStmt (m, pois, vis) =
       let b0 = stmtBasicBlock exitStmt
-      in case exitStmt of
-        Stmt { stmtInstr = Ret rv } ->
+      in case stmtInstr exitStmt of
+        Ret rv ->
           pushReturnUp Nothing (rv, b0) (m, pois, vis)
         _ -> (m, pois, vis)
     pushReturnUp :: Maybe BasicBlock -> (Value, BasicBlock) -> (HashMap BasicBlock Value, HashSet BasicBlock, HashSet BasicBlock) -> (HashMap BasicBlock Value, HashSet BasicBlock, HashSet BasicBlock)

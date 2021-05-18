@@ -87,13 +87,13 @@ discardNothings acc a (Just e) = HM.insert a e acc
 scalarTransfer :: (Monad m) => ScalarInfo -> Stmt -> m ScalarInfo
 scalarTransfer si i =
   case stmtInstr i of
-    AtomicRW _ AtomicAdd _ (Value _ _ (ValInteger 1)) _ _ ->
+    AtomicRW _ AtomicAdd _ (valValue -> ValInteger 1) _ _ ->
       recordIfAffectsArgument EffectAdd1 i si
-    AtomicRW _ AtomicAdd _ (Value _ _ (ValInteger (-1))) _ _ ->
+    AtomicRW _ AtomicAdd _ (valValue -> ValInteger (-1)) _ _ ->
       recordIfAffectsArgument EffectSub1 i si
-    AtomicRW _ AtomicSub _ (Value _ _ (ValInteger 1)) _ _ ->
+    AtomicRW _ AtomicSub _ (valValue -> ValInteger 1) _ _ ->
       recordIfAffectsArgument EffectSub1 i si
-    AtomicRW _ AtomicSub _ (Value _ _ (ValInteger (-1))) _ _ ->
+    AtomicRW _ AtomicSub _ (valValue -> ValInteger (-1)) _ _ ->
       recordIfAffectsArgument EffectAdd1 i si
     Store sv sa _ _
       | isNonAtomicAdd sa sv -> recordIfAffectsArgument EffectAdd1 i si
@@ -104,16 +104,16 @@ isNonAtomicSub :: (IsValue a) => Value -> a -> Bool
 isNonAtomicSub sa sv =
   case toValue sv of
     ValInstr (Arith Sub {}
-      (Value _ _ (ValInteger (-1)))
+      (valValue -> ValInteger (-1))
       (ValInstr (Load la _ _))) ->
       sa == la
     ValInstr (Arith Sub {}
       (ValInstr (Load la _ _))
-      (Value _ _ (ValInteger (-1)))) ->
+      (valValue -> ValInteger (-1))) ->
       sa == la
     ValInstr (Arith Add {}
       (ValInstr (Load la _ _))
-      (Value _ _ (ValInteger 1))) ->
+      (valValue -> ValInteger 1)) ->
       sa == la
     _ -> False
 
@@ -121,16 +121,16 @@ isNonAtomicAdd :: (IsValue a) => Value -> a -> Bool
 isNonAtomicAdd sa sv =
   case toValue sv of
     ValInstr (Arith Add {}
-      (Value _ _ (ValInteger 1))
+      (valValue -> ValInteger 1)
       (ValInstr (Load la _ _))) ->
       sa == la
     ValInstr (Arith Add {}
       (ValInstr (Load la _ _))
-      (Value _ _ (ValInteger 1))) ->
+      (valValue -> ValInteger 1)) ->
       sa == la
     ValInstr (Arith Sub {}
       (ValInstr (Load la _ _))
-      (Value _ _ (ValInteger (-1)))) ->
+      (valValue -> ValInteger (-1))) ->
       sa == la
     _ -> False
 

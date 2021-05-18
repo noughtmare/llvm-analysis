@@ -64,6 +64,8 @@ import qualified Data.Set as S
 import LLVM.Analysis
 import LLVM.Analysis.PointsTo
 
+import Debug.Trace
+
 -- | A type synonym for the underlying graph
 type CG = Gr CallNode CallEdge
 
@@ -177,8 +179,8 @@ toCallValue :: CG -> Vertex -> Maybe Value
 toCallValue g v = do
   l <- FGL.lab g v
   case l of
-    Def f -> return (Value (getType f) (defUniqueId f) (ValSymbol (SymValDefine f)))
-    Dec ef -> return (Value (getType ef) (decUniqueId ef) (ValSymbol (SymValDeclare ef)))
+    Def f -> return (toValue f)
+    Dec ef -> return (toValue  ef)
     _ -> Nothing
 
 -- | Build a call graph for the given 'Module' using a pre-computed
@@ -254,7 +256,7 @@ buildCallEdges pta caller Stmt {stmtInstr = callInst} = build' (getCallee callIn
       case valValue calledFunc of
         ValSymbol (SymValDefine f) ->
           [(callerId, defUniqueId f, DirectCall)]
-        ValSymbol (SymValAlias GlobalAlias { aliasValue = aliasee }) ->
+        ValSymbol (SymValAlias GlobalAlias { aliasTarget = aliasee }) ->
           [(callerId, valUniqueId aliasee, DirectCall)]
         ValSymbol (SymValDeclare ef) ->
           [(callerId, decUniqueId ef, DirectCall)]

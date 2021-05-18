@@ -1,6 +1,6 @@
 fromList [ ("%for.body", -79)
          , ("%for.cond", -79)
-         , ("%for.end", -79)
+         , ("%for.cond.cleanup", -79)
          , ("%while.end", -79)
          , ("%if.end", 10)
          , ("%if.then", -1)

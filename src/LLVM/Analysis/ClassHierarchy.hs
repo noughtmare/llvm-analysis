@@ -75,12 +75,12 @@ resolveVirtualCallee cha i =
   case i of
     -- Resolve direct calls (note, this does not cover calls to
     -- external functions, unfortunately).
-    Call _ _ (Value _ _ (ValSymbol (SymValDefine f))) _ -> Just [f]
+    Call _ _ (valValue -> ValSymbol (SymValDefine f)) _ -> Just [f]
     -- Resolve actual virtual dispatches.  Note that the first
     -- argument is always the @this@ pointer.
     Call _ _ (ValInstr (Load la _ _)) (thisVal : _) ->
       virtualDispatch cha la thisVal
-    Invoke _ (Value _ _ (ValSymbol (SymValDefine f))) _ _ _ -> Just [f]
+    Invoke _ (valValue -> ValSymbol (SymValDefine f)) _ _ _ -> Just [f]
     Invoke _ (ValInstr (Load la _ _)) (thisVal : _) _ _ ->
       virtualDispatch cha la thisVal
     _ -> Nothing
@@ -97,6 +97,8 @@ virtualDispatch cha loadAddr thisVal = do
     vtbls = mapMaybe (classVTable cha) derivedTypes
 
 -- TODO check if these patterns still hold
+-- TODO I added valValue here in the comparisons, but maybe the equality
+--      instance of Value itself should be changed
 --
 -- | Identify the slot number of a virtual function call.  Basically,
 -- work backwards from the starred instructions in the virtual
@@ -109,6 +111,14 @@ virtualDispatch cha loadAddr thisVal = do
 --   %vfn = getelementptr inbounds void (%struct.Base*)** %vtable, i64 1
 -- * %3 = load void (%struct.Base*)** %vfn
 --   call void %3(%struct.Base* %0)
+--
+-- clang-13 (from tests/virtual-dispatch/second-method.cpp):
+--
+--   %0 = bitcast %struct.DispatchBase* %b to void (%struct.DispatchBase*)***
+--   %vtable = load void (%struct.DispatchBase*)**, void (%struct.DispatchBase*)*** %0, align 8, !tbaa !2
+--   %vfn = getelementptr inbounds void (%struct.DispatchBase*)*, void (%struct.DispatchBase*)** %vtable, i64 1
+-- * %1 = load void (%struct.DispatchBase*)*, void (%struct.DispatchBase*)** %vfn, align 8
+--   call void %1(%struct.DispatchBase* nonnull dereferenceable(8) %b)
 --
 -- clang0:
 --
@@ -135,26 +145,27 @@ virtualDispatch cha loadAddr thisVal = do
 -- * %4 = load i32 (...)** %3, align 4
 --   %5 = bitcast i32 (...)* %4 to void (%struct.Base*)*
 --   call void %5(%struct.Base* %1)
+
 getVFuncSlot :: CHA -> Value -> Value -> Maybe Int
 getVFuncSlot cha loadAddr thisArg =
   case loadAddr of
     -- Clang style
     ValInstr (GEP _
         (ValInstr (Load (ValInstr (Conv BitCast thisPtr _)) _ _))
-        [Value _ _ (ValInteger slotNo)])
+        [valValue -> ValInteger slotNo])
       | thisArg == thisPtr -> Just $! fromIntegral slotNo
     ValInstr (Load (ValInstr (Conv BitCast base _)) _ _)
       | thisArg == base -> Just 0
     -- Dragonegg0 style (slot 0 call)
-    ValInstr (Load (ValInstr (GEP _ thisPtr [Value _ _ (ValInteger 0), Value _ _ (ValInteger 0)])) _ _)
+    ValInstr (Load (ValInstr (GEP _ thisPtr [valValue -> ValInteger 0, valValue -> ValInteger 0])) _ _)
       | thisArg == thisPtr -> Just 0
     -- Dragonegg general case
     ValInstr (Conv BitCast
       (ValInstr (GEP _
         (ValInstr (Conv BitCast
           (ValInstr (Load
-            (ValInstr (GEP _ thisPtr [Value _ _ (ValInteger 0), Value _ _ (ValInteger 0)])) _ _)) _))
-        [Value _ _ (ValInteger offset)])) _)
+            (ValInstr (GEP _ thisPtr [valValue -> ValInteger 0, valValue -> ValInteger 0])) _ _)) _))
+        [valValue -> ValInteger offset])) _)
       | thisArg == thisPtr -> Just $! indexFromOffset cha (fromIntegral offset)
     _ -> Nothing
 
@@ -257,15 +268,22 @@ recordParents gv acc =
         TypeInfo tn -> error ("LLVM.Analysis.ClassHierarchy.recordParents: Expected a class name for typeinfo: " ++ show tn)
         _ -> acc
   where
-    Symbol n = globalSym gv
+    Symbol n = globalName gv
     dname = demangleName n
 
+-- TODO I added a case for a struct with a array fields, which seems to be a new
+--      way that clang 13 encodes classes, but I should investigate further.
 -- | Record the vtable by storing only the function pointers from the
 recordVTable :: CHA -> Name -> Maybe Value -> CHA
 recordVTable cha name Nothing =
   cha { vtblMap = M.insert name ExternalVTable (vtblMap cha) }
-recordVTable cha name (Just (Value _ _ (ValArray _ vs)))
+recordVTable cha name (Just (valValue -> ValArray _ vs))
   = cha { vtblMap = M.insert name (makeVTable vs) (vtblMap cha) }
+recordVTable cha name (Just (valValue -> ValStruct vss _))
+  = cha { vtblMap = M.insert name (makeVTable (arrayElems =<< vss)) (vtblMap cha) }
+  where
+    arrayElems (valValue -> ValArray _ vs) = vs
+    arrayElems _ = []
 recordVTable cha name _ = recordVTable cha name Nothing
 
 -- | Build a VTable given the list of values in the vtable array.  The
@@ -277,16 +295,19 @@ makeVTable =
   VTable . V.fromList . map unsafeToDefine . takeWhile isVTableFunctionType . dropWhile (not . isVTableFunctionType)
 
 unsafeToDefine :: Value -> Define
-unsafeToDefine (Value _ _ (ValSymbol (SymValDefine f))) = f
+unsafeToDefine (valValue -> ValSymbol (SymValDefine f)) = f
+unsafeToDefine (valValue -> ValConstExpr (ConstConv BitCast (valValue -> ValSymbol (SymValDefine f)) _)) = f
 unsafeToDefine v = error ("LLVM.Analysis.ClassHierarchy.unsafeToDefine: Expected vtable function entry: " ++ show v)
 
+-- TODO I added a case for bitcasts here, reevalutate!
 isVTableFunctionType :: Value -> Bool
-isVTableFunctionType (Value _ _ (ValSymbol (SymValDefine _))) = True
+isVTableFunctionType (valValue -> ValSymbol (SymValDefine _)) = True
+isVTableFunctionType (valValue -> ValConstExpr (ConstConv BitCast (valValue -> ValSymbol (SymValDefine _)) _)) = True
 isVTableFunctionType _ = False
 
 recordTypeInfo :: CHA -> Name -> Maybe Value -> CHA
 recordTypeInfo cha _ Nothing = cha
-recordTypeInfo cha name (Just (Value _ _ (ValStruct vs _))) =
+recordTypeInfo cha name (Just (valValue -> ValStruct vs _)) =
   let parentClassNames = mapMaybe toParentClassName vs
   in cha { parentMap = MS.insertWith S.union name (S.fromList parentClassNames) (parentMap cha)
          , childrenMap = foldr (addChild name) (childrenMap cha) parentClassNames
@@ -294,7 +315,7 @@ recordTypeInfo cha name (Just (Value _ _ (ValStruct vs _))) =
 recordTypeInfo _ _ (Just tbl) = error ("LLVM.Analysis.ClassHierarchy.recordTypeInfo: Expected typeinfo literal " ++ show tbl)
 
 toParentClassName :: Value -> Maybe Name
-toParentClassName (Value _ _ (ValConstExpr (ConstConv BitCast (Value _ _ (ValSymbol (SymValGlobal Global {globalSym=Symbol gvn}))) _))) =
+toParentClassName (valValue -> ValConstExpr (ConstConv BitCast (valValue -> ValSymbol (SymValGlobal Global {globalName=Symbol gvn})) _)) =
       case demangleName gvn of
         Left _ -> Nothing
         Right (TypeInfo (ClassEnumType n)) -> Just n

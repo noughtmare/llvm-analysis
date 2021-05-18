@@ -5,7 +5,6 @@ import Data.Map ( Map )
 import Data.Set ( Set )
 import qualified Data.Map as M
 import qualified Data.Set as S
-import Data.Monoid
 import System.Environment ( getArgs, withArgs )
 import System.FilePath
 import Test.HUnit ( assertEqual )
@@ -15,7 +14,15 @@ import LLVM.Analysis
 import LLVM.Analysis.PointsTo.Andersen
 import LLVM.Analysis.PointsTo
 import LLVM.Analysis.Util.Testing
-import LLVM.Parse
+
+import Data.LLVM.BitCode (parseBitCode)
+import Text.LLVM.Resolve (resolve)
+import qualified Data.ByteString as B
+import Data.Either (fromRight)
+import Data.Maybe (fromMaybe)
+
+import Debug.Trace
+import System.IO
 
 #if defined(DEBUGGRAPH)
 import Data.GraphViz
@@ -31,39 +38,42 @@ viewConstraintGraph :: a -> Andersen -> a
 viewConstraintGraph = const
 #endif
 
+-- TODO figure out how to get more sensible value names
 extractSummary :: Module -> Map String (Set String)
 extractSummary m =
   foldr addInfo mempty ptrs `viewConstraintGraph` pta
   where
     pta = runPointsToAnalysis m
     ptrs = map toValue (globalPointerVariables m) ++ formals -- ++ map Value (functionPointerParameters m)
-    formals = concatMap (map toValue . functionParameters) (moduleDefinedFunctions m)
-    addInfo v r =
-      let vals = pointsTo pta v
-          name = maybe "???" show (valueName v)
-      in case null vals of
-        True -> r
-        False ->
-          let targets = map (maybe "??" show . valueName) vals -- `debug` show vals
+    formals = concatMap (map toValue . defArgs) (modDefines m)
+    addInfo v r
+      | null vals = r
+      | otherwise = -- trace "!!!HERE!!!" $
+          let targets = map (fromMaybe "??" . prettyValName) vals -- `debug` show vals
           in M.insert name (S.fromList targets) r
+      where
+        vals = {- trace ("pointsTo pta " ++ show (valValue v)) $ -} pointsTo pta v
+        name = fromMaybe "???" (valName v) -- TODO figure out why this doesn't need prettyValName
 
+isPointerType :: Type -> Bool
 isPointerType t = case t of
-  TypePointer _ _ -> True
+  PtrTo _ -> True
   _ -> False
 
 isPointer :: (IsValue a) => a -> Bool
-isPointer = isPointerType . valueType
+isPointer = isPointerType . valType . toValue
 
-globalPointerVariables :: Module -> [GlobalVariable]
-globalPointerVariables m = filter isPointer (moduleGlobalVariables m)
+globalPointerVariables :: Module -> [Global]
+globalPointerVariables m = filter isPointer (modGlobals m)
 
 functionPointerParameters :: Module -> [Argument]
-functionPointerParameters m = concatMap pointerParams (moduleDefinedFunctions m)
+functionPointerParameters m = concatMap pointerParams (modDefines m)
   where
-    pointerParams = filter isPointer . functionParameters
+    pointerParams = filter isPointer . defArgs
 
 main :: IO ()
 main = do
+  hSetBuffering stdout LineBuffering
   args <- getArgs
   let pattern = case args of
         [] -> "tests/points-to-inputs/*/*.c"
@@ -81,5 +91,12 @@ main = do
     -- works fine with unoptimized bitcode), but comparing the results
     -- visually is much easier with the optimized version.
     opts = [ "-mem2reg", "-basicaa", "-gvn" ]
-    parser = parseLLVMFile defaultParserOptions
     expectedMapper = (<.> "expected-andersen")
+    parser _ h = do
+      bc <- B.hGetContents h
+      m <- fromRight (error "Parse error") <$> parseBitCode bc
+      -- print m
+      let r = resolve m
+      -- print r
+      return r
+

@@ -29,10 +29,10 @@ import Control.Monad ( (>=>), (<=<) )
 import Control.Monad.Trans.Class
 import Control.Monad.Trans.State.Strict
 import Data.Function ( on )
-import qualified Data.GraphViz as GV
+-- import qualified Data.GraphViz as GV
 import qualified Data.List as L
-import Data.Map ( Map )
-import qualified Data.Map as M
+import Data.Map.Strict ( Map )
+import qualified Data.Map.Strict as M
 import Data.Maybe ( fromMaybe, mapMaybe )
 -- import Data.Monoid
 import Data.Set ( Set )
@@ -116,7 +116,7 @@ instance NonLocal Insn where
   successors UniqueExit = []
 
 instance Show (Insn e x) where
-  show (Lbl _bb _) = {- TODO: identifierAsString (basicBlockName bb) ++ -} "?:"
+  show (Lbl bb _) = bbName bb ++ "?:"
   show (Terminator t _) = "  " ++ show t
   show (Normal i) = "  " ++ show i
   show (UniqueExitLabel _) = "UniqueExit:"
@@ -147,7 +147,7 @@ controlFlowGraph f = runSimpleUniqueMonad (evalStateT builder mempty)
                     , cfgPredecessors = mempty
                     }
           preds = foldr (recordPreds cfg) mempty (defBody f)
-      return $ cfg { cfgPredecessors = fmap S.toList preds }
+      return cfg { cfgPredecessors = fmap S.toList preds }
     addPred pblock b =
       M.insertWith S.union b (S.singleton pblock)
     recordPreds cfg bb acc =
@@ -190,9 +190,10 @@ fromBlock xlabel bb@BasicBlock { bbStmts = body } = do
 -- results are desired, just check the dataflow result for RetInst
 -- results.
 terminatorLabels :: Label -> Stmt -> Builder [Label]
-terminatorLabels xlabel Stmt { stmtInstr = i } =
-  case i of
+terminatorLabels xlabel i =
+  case stmtInstr i of
     Ret {} -> return [xlabel]
+    RetVoid -> return [xlabel]
     Jump t -> do
       bl <- blockLabel t
       return [bl]
@@ -212,7 +213,7 @@ terminatorLabels xlabel Stmt { stmtInstr = i } =
       nl <- blockLabel nt
       ul <- blockLabel ut
       return [nl, ul]
-    _ -> error "LLVM.Analysis.CFG.successors: non-terminator instruction"
+    _ -> error $ "LLVM.Analysis.CFG.successors: non-terminator instruction: " ++ show (stmtInstr i)
 
 basicBlockPredecessors :: (HasCFG cfgLike) => cfgLike -> BasicBlock -> [BasicBlock]
 basicBlockPredecessors cfgLike bb =

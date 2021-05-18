@@ -1,4 +1,5 @@
 {-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 -- | This top-level module exports the LLVM IR definitions and some
 -- basic functions to inspect the IR.  The sub-modules under
@@ -15,9 +16,9 @@ module LLVM.Analysis (
   defStmts,
   instructionOperands,
 --  basicBlockInstructions,
-  defExitStmts,
   bbTerminatorStmt,
   pattern ValInstr,
+  valueContent',
 
   -- * Extra helpers
   FuncLike(..),
@@ -31,21 +32,22 @@ import LLVM.TypeInference (HasType (getType))
 
 -- TODO: move this trash to LLVM.Types
 
+{-# INLINABLE valueContent' #-}
+-- | A version of @valueContent@ that ignores (peeks through)
+-- bitcasts.  This is most useful in view patterns.
+valueContent' :: IsValue a => a -> Value
+valueContent' v =
+  case toValue v of
+    ValInstr (Conv BitCast cv _) -> valueContent' cv
+    (valValue -> ValConstExpr (ConstConv BitCast cv _)) -> valueContent' cv
+    _ -> toValue v
+
 pattern ValInstr :: Instr -> Value
-pattern ValInstr a <- Value { valValue = ValIdent (IdentValStmt Stmt { stmtInstr = a }) }
+pattern ValInstr a <- (valValue -> ValIdent (IdentValStmt Stmt { stmtInstr = a }))
 
 {-# INLINABLE bbTerminatorStmt #-}
 bbTerminatorStmt :: BasicBlock -> Stmt
 bbTerminatorStmt = last . bbStmts
-
-defExitStmts :: Define -> [Stmt]
-defExitStmts f = filter isRetStmt is
-  where
-    is = concatMap bbStmts (defBody f)
-    isRetStmt Stmt { stmtInstr = Ret _ } = True
-    isRetStmt Stmt { stmtInstr = Unreachable } = True
-    isRetStmt _ = False
-
 
 class HasDefine a where
   getDefine :: a -> Define
@@ -62,9 +64,6 @@ instance HasDefine BasicBlock where
 
 defStmts :: Define -> [Stmt]
 defStmts Define {defBody = bbs} = bbStmts =<< bbs
-
--- basicBlockInstructions :: BasicBlock -> [Instr]
--- basicBlockInstructions BasicBlock { bbStmts = stmts } = map stmtInstr stmts
 
 -- | Return all of the operands for an instruction.  Note that "special"
 -- operands (like the 'Type' in a vararg inst) cannot be returned.  For

@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ViewPatterns #-}
 -- | This module defines a number of allocation profiles that are
 -- meant to be inputs to the points-to analyses.  These profiles
 -- identify the set of instructions that allocate *fresh* memory
@@ -21,7 +22,7 @@ import LLVM.Analysis
 -- This function returns True if the given instruction must be a call
 -- to a standard C library allocation function.
 standardCProfile :: Instr -> Bool
-standardCProfile (Call _ _ (Value _ _ (ValSymbol (SymValDeclare ef))) _) =
+standardCProfile (Call _ _ (valValue -> ValSymbol (SymValDeclare ef)) _) =
   let Symbol ident = decName ef
   in ident == "malloc" || ident == "calloc" || ident == "alloca"
 standardCProfile _ = False
