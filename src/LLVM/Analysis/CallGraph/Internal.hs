@@ -28,6 +28,7 @@ module LLVM.Analysis.CallGraph.Internal (
   -- * CallGraphSCC Traversal
   ComposableAnalysis,
   callGraphSCCTraversal,
+  monolithicTraversal,
   parallelCallGraphSCCTraversal,
 
   -- * Adaptors
@@ -365,6 +366,23 @@ callGraphSCCTraversal callgraph f seed =
     sccList = FGL.topsort' cg
     applyAnalysis component =
       f (map (fromDefine . snd) component)
+
+monolithicTraversal
+  :: FuncLike funcLike
+  => CallGraph
+  -> ([funcLike] -> summary -> summary)
+  -> summary
+  -> summary
+monolithicTraversal callgraph f seed = 
+  f (concat (map (map (fromDefine . snd)) sccList)) seed
+  -- Note, have to reverse the list here to process in bottom-up order
+  -- since foldM is a left fold
+  --
+  -- NOTE now not reversing the SCC list because it is now a right
+  -- fold
+  where
+    cg = definedCallGraph callgraph
+    sccList = FGL.topsort' cg
 
 -- | The projection of the call graph containing only defined
 -- functions (no externals)

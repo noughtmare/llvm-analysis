@@ -415,13 +415,22 @@ fieldDescriptor base ixs0 = go (valType base) ixs0 where
   -- zero (as in it *is* an array access), we only care about the
   -- ultimate field access and not the array.  Raw arrays are taken
   -- care of above.
-  go' (PtrTo t) (_:rest) = return $ walkType t rest
+  go' (PtrTo t) (_:rest) = walkType t rest
   go' _ _ = Nothing
 
-walkType :: Type -> [Value] -> (Type, Int)
+mayPtrToStructFields :: Type -> Maybe [Type]
+mayPtrToStructFields (PtrTo (Struct _ flds _)) = Just flds
+mayPtrToStructFields _ = Nothing
+
+mayValInstr :: Value -> Maybe Instr
+mayValInstr (valValue -> ValIdent (IdentValStmt (stmtInstr -> i))) = Just i
+mayValInstr _ = Nothing
+
+walkType :: Type -> [Value] -> Maybe (Type, Int)
 walkType t [] = error ("LLVM.Analysis.PointsTo.Andersen.walkType: expected non-empty index list for " ++ show t)
-walkType t [valValue -> ValInteger iv] =
-  (t, fromIntegral iv)
+walkType (Array _ _) [_] = Nothing
+walkType t [valValue -> ValInteger iv] = Just (t, fromIntegral iv)
+walkType t [ix] = error ("LLVM.Analysis.PointsTo.Andersen.walkType: expected final index to be constant integer for " ++ show t ++ ", but got: " ++ show ix)
 walkType t (ix:ixs) =
   case t of
     -- We can ignore inner array indices since we only care about the

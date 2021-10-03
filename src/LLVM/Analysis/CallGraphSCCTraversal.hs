@@ -14,6 +14,7 @@
 module LLVM.Analysis.CallGraphSCCTraversal (
   -- * Traversals
   callGraphSCCTraversal,
+  monolithicTraversal,
   parallelCallGraphSCCTraversal,
 
   -- * Types
